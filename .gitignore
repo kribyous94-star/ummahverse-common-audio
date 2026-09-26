@@ -1,0 +1,33 @@
+# Environnements Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Médias et résultats : jamais dans le dépôt
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.aac
+*.mka
+*.mkv
+*.mp4
+*.mov
+*.raw
+*.pcm
+fixtures/
+resultats/
+results/
+output/
+out/
+benchmarks/
+
+# Système
+.DS_Store
+Thumbs.db
