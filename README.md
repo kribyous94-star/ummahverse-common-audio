@@ -39,14 +39,15 @@ l'étape suivante d'UmmahVerse, avec votre outil existant.
 5. [Vos fichiers d'entrée ne sont jamais modifiés](#vos-fichiers-dentrée-ne-sont-jamais-modifiés)
 6. [Démarrer l'interface graphique](#démarrer-linterface-graphique)
 7. [Parcours complet : deux langues, puis une troisième](#parcours-complet--deux-langues-puis-une-troisième)
-8. [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
-9. [Les fichiers produits](#les-fichiers-produits)
-10. [Quand l'outil refuse ou prévient](#quand-loutil-refuse-ou-prévient)
-11. [Limites de la séparation](#limites-de-la-séparation)
-12. [Performances](#performances)
-13. [Dépannage](#dépannage)
-14. [Tests et mesures](#tests-et-mesures)
-15. [Documentation complémentaire](#documentation-complémentaire)
+8. [Vérifier qu'il y a une bande commune](#avant-toute-extraction--vérifier-quil-y-a-bien-une-bande-commune)
+9. [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
+10. [Les fichiers produits](#les-fichiers-produits)
+11. [Quand l'outil refuse ou prévient](#quand-loutil-refuse-ou-prévient)
+12. [Limites de la séparation](#limites-de-la-séparation)
+13. [Performances](#performances)
+14. [Dépannage](#dépannage)
+15. [Tests et mesures](#tests-et-mesures)
+16. [Documentation complémentaire](#documentation-complémentaire)
 
 ## Prérequis
 
@@ -268,6 +269,50 @@ compris dans une session ultérieure — il suffit de désigner les deux fichier
    « Écrire aussi le commun adapté » pour obtenir le commun tel qu'il a été
    transformé, utile à l'écoute de contrôle.
 
+## Avant toute extraction : vérifier qu'il y a bien une bande commune
+
+C'est **la** condition de réussite, et elle n'est pas acquise. Deux versions
+linguistiques d'un même film ne partagent une bande musique/bruitages que si elles
+sont issues du **même mixage M&E**. Beaucoup d'éditions remixent : les scènes sont
+les mêmes, au même instant, mais les formes d'onde n'ont plus rien en commun. Dans ce
+cas, le commun sort vide — et aucun réglage n'y changera rien.
+
+Deux commandes répondent à la question, sans rien écrire :
+
+```bash
+# Un extrait : verdict en quelques secondes
+python -m ummahverse_audio analyze --input-a A.wav --input-b B.wav
+
+# Un film entier : carte des zones exploitables
+python -m ummahverse_audio scout --input-a film_FR.mkv --input-b film_EN.mkv     --report carte.json
+```
+
+`analyze` et `extract` affichent tous deux un **verdict** :
+
+```text
+[ÉCHEC] Aucune bande commune détectée entre ces deux versions.
+  Les deux pistes sont pourtant bien synchrones (alignement par enveloppes
+  d'énergie, confiance 0.87) : ce sont les mêmes scènes, au même instant. Mais
+  leurs formes d'onde ne partagent que 2.9 % d'énergie cohérente. Autrement dit,
+  la musique et les bruitages ont été remixés d'une version à l'autre.
+  Aucun réglage ne corrigera cela. Il faut deux pistes issues du même mixage M&E.
+```
+
+| Verdict | Cohérence corrigée | Ce que cela veut dire |
+|---|---|---|
+| `[ÉCHEC]` | < 3 % | pas de master commun : inutile d'extraire |
+| `[FAIBLE]` | 3 – 12 % | quelques scènes seulement, souvent le générique |
+| `[PARTIEL]` | 12 – 35 % | extraction possible, qualité à contrôler à l'oreille |
+| `[OK]` | > 35 % | conditions favorables |
+
+La cohérence affichée est **corrigée de son biais** : avec une dizaine de moyennes
+indépendantes, deux signaux sans aucun rapport donnent déjà 10 %, ce qui ferait
+passer deux mixages étrangers pour partiellement communs.
+
+**Comment trouver une bonne paire** : privilégiez deux pistes du **même disque** ou de
+la **même édition** — un Blu-ray multilingue, par exemple. Deux éditions différentes,
+ou deux pays différents, ont souvent des mixages distincts.
+
 ## Utilisation en ligne de commande
 
 Les trois commandes du contrat :
@@ -295,6 +340,9 @@ python -m ummahverse_audio probe film_FR.mkv
 
 # Contrôler compatibilité et alignement sans rien écrire
 python -m ummahverse_audio analyze --input-a A.wav --input-b B.wav
+
+# Repérer, sur un film entier, les zones où la séparation peut fonctionner
+python -m ummahverse_audio scout --input-a A.mkv --input-b B.mkv --report carte.json
 ```
 
 ### Options principales
@@ -468,7 +516,9 @@ Mesuré sur Ubuntu 24.04, Python 3.12, 16 cœurs, entrées WAV stéréo 48 kHz
 | `contient N flux audio : le choix doit être explicite` | lancez `probe`, puis passez `--stream-a` / `--stream-b` (ou choisissez dans la liste de l'interface) |
 | `Nombres de canaux différents` | préparez vous-même deux pistes de même agencement ; l'outil ne fera pas le downmix à votre place |
 | `Agencement de canaux inconnu` | déclarez l'agencement avec FFmpeg, ou `--allow-unknown-layout` si l'ordre est sûr |
-| `Aucun décalage global n'a pu être estimé` | pistes issues de montages différents, ou décalage > `--max-offset` : augmentez `--max-offset` |
+| `Aucun alignement exploitable` | pistes de montages différents, ou décalage > `--max-offset` : augmentez `--max-offset` |
+| **`common.wav` est vide ou quasi silencieux** | lancez `analyze` : le verdict dira si les deux versions partagent un master M&E. Si le verdict est `[ÉCHEC]`, elles ont été remixées et aucun réglage n'y changera rien |
+| Le commun ne contient que le générique | c'est le symptôme d'un remixage : seule la musique de fin est restée commune. `scout` donne la carte complète |
 | `Application non installée` au lancement | lancez `bash install.sh` (ou `install.bat`) |
 | `Aucun interpréteur Python 3.10+` | installez Python 3.10 ou plus récent, ou indiquez-le : `bash install.sh --python /chemin/python3.12` |
 | `Aucun environnement graphique détecté` | `run.sh` a besoin de `DISPLAY` ou `WAYLAND_DISPLAY` ; en SSH, utilisez `bash run.sh -- extract …` |
@@ -484,7 +534,7 @@ Mesuré sur Ubuntu 24.04, Python 3.12, 16 cœurs, entrées WAV stéréo 48 kHz
 ## Tests et mesures
 
 ```bash
-# Suite complète (140 tests, ~30 s)
+# Suite complète (154 tests, ~75 s)
 .venv/bin/python -m pytest -q
 
 # Un domaine à la fois

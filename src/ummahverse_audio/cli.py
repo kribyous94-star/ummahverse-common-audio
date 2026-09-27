@@ -130,6 +130,24 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--allow-unknown-layout", action="store_true")
     _add_common_analysis_options(analyze)
 
+    scout = subparsers.add_parser(
+        "scout", help="repère les zones d'un film où les deux versions ont une bande commune",
+        description="Balaie les deux entrées par fenêtres et indique où la séparation "
+                    "a des chances de fonctionner. N'écrit aucun fichier audio.")
+    scout.add_argument("--input-a", type=Path, required=True)
+    scout.add_argument("--input-b", type=Path, required=True)
+    scout.add_argument("--stream-a", type=int, default=None)
+    scout.add_argument("--stream-b", type=int, default=None)
+    scout.add_argument("--window", type=float, default=20.0, dest="window_s",
+                       help="durée des fenêtres de repérage, en secondes (défaut : 20)")
+    scout.add_argument("--sample-rate", type=int, default=None)
+    scout.add_argument("--allow-unknown-layout", action="store_true")
+    scout.add_argument("--workspace-dir", type=Path, default=None)
+    scout.add_argument("--report", type=Path, default=None,
+                       help="écrit le relevé complet dans ce fichier JSON")
+    scout.add_argument("--quiet", action="store_true")
+    scout.add_argument("--json", action="store_true", dest="print_json")
+
     probe = subparsers.add_parser("probe", help="liste les flux audio d'un fichier")
     probe.add_argument("path", type=Path)
     probe.add_argument("--json", action="store_true", dest="print_json")
@@ -265,6 +283,41 @@ def _run_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_scout(args: argparse.Namespace) -> int:
+    from .metadata import write_json
+    from .scout import run_scout
+
+    report = run_scout(
+        input_a=args.input_a, input_b=args.input_b, stream_a=args.stream_a,
+        stream_b=args.stream_b, window_s=args.window_s, sample_rate=args.sample_rate,
+        allow_unknown_layout=args.allow_unknown_layout,
+        workspace_dir=args.workspace_dir, progress=ConsoleProgress(quiet=args.quiet))
+    if args.report:
+        write_json(args.report, report.payload)
+    if args.print_json:
+        json.dump(report.payload, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 0
+    for line in report.summary_lines():
+        print(line)
+    _print_verdict_dict(report.payload["common_bed_verdict"])
+    for warning in report.warnings:
+        print(f"  - {warning}")
+    if args.report:
+        print(f"Relevé complet : {args.report}")
+    return 0
+
+
+def _print_verdict_dict(payload: dict) -> None:
+    marker = {"absente": "[ÉCHEC]", "faible": "[FAIBLE]",
+              "partielle": "[PARTIEL]", "bonne": "[OK]"}.get(payload["level"], "")
+    print(f"\n{marker} {payload['headline']}")
+    for key in ("detail", "advice"):
+        if payload.get(key):
+            print(f"  {payload[key]}")
+    print()
+
+
 def _run_probe(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
@@ -292,7 +345,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     handlers = {"extract": _run_extract, "subtract": _run_subtract,
-                "analyze": _run_analyze, "probe": _run_probe, "gui": _run_gui}
+                "analyze": _run_analyze, "scout": _run_scout,
+                "probe": _run_probe, "gui": _run_gui}
     try:
         return handlers[args.command](args)
     except Cancelled as exc:

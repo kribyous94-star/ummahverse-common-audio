@@ -246,3 +246,50 @@ def test_verdict_separates_misalignment_from_missing_common_bed():
     unaligned = judge(0.001, 0.0, 0.0, "envelope", 0.05)
     assert "alignement" in unaligned.headline.lower()
     assert "flux audio" in unaligned.advice
+
+
+# --------------------------------------------------------------------------- #
+# Repérage des zones exploitables (`scout`)
+# --------------------------------------------------------------------------- #
+def test_scout_finds_the_shared_region_and_ignores_the_rest(tmp_path):
+    """Un film dont seule une partie partage un master : scout doit la désigner."""
+    from ummahverse_audio.scout import run_scout
+
+    rng = np.random.default_rng(3)
+    n = 120 * SAMPLE_RATE
+    shared = make_music(n, rng)
+    remixed = remixed_bed(n, 500, shared)
+    voice_a, voice_b = make_voice(n, 143, 0.0), make_voice(n, 187, 0.16)
+
+    # Les 40 premières secondes partagent le lit musical, le reste est remixé.
+    cut = 40 * SAMPLE_RATE
+    bed_b = np.concatenate([shared[:cut], remixed[cut:]])
+    a = write_wav(tmp_path / "a.wav", np.column_stack([shared + voice_a] * 2))
+    b = write_wav(tmp_path / "b.wav", np.column_stack([bed_b + voice_b] * 2))
+
+    report = run_scout(a, b, window_s=10.0)
+    assert report.windows, "aucune fenêtre analysée"
+    early = [w.coherence for w in report.windows if w.end_s <= 40]
+    late = [w.coherence for w in report.windows if w.start_s >= 50]
+    assert early and late
+    assert np.median(early) > 0.5, np.median(early)
+    assert np.median(late) < 0.2, np.median(late)
+    # La plage partagée doit ressortir dans le relevé.
+    ranges = report.ranges()
+    assert ranges, "aucune plage exploitable repérée"
+    assert ranges[0][0] < 5 and ranges[0][1] >= 30, ranges
+    assert report.payload["operation"] == "scout"
+    assert report.payload["usable_ranges"]
+
+
+def test_scout_writes_no_audio_and_leaves_inputs_untouched(scene, tmp_path):
+    import hashlib
+
+    from ummahverse_audio.scout import run_scout
+
+    before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (scene.a, scene.b)}
+    inventory = sorted(item.name for item in scene.a.parent.iterdir())
+    run_scout(scene.a, scene.b, window_s=2.0)
+    for path, digest in before.items():
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    assert sorted(item.name for item in scene.a.parent.iterdir()) == inventory
