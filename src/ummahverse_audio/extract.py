@@ -17,6 +17,8 @@ from .blocks import BlockPlan, align_spectrum, delay_spectrum, read_extended, sp
 from .errors import UmmahAudioError
 from .ffmpeg_tools import describe_environment
 from .metadata import (base_payload, limitations_notice, stream_descriptor, write_json)
+from .paths import (ensure_distinct_outputs, ensure_inputs_untouched,
+                    ensure_writable_directory)
 from .perf import Stopwatch
 from .progress import Progress, SubProgress
 from .separate import (BlockDiagnostics, SeparationParams, SeparationSummary,
@@ -92,9 +94,15 @@ def run_extract(options: ExtractOptions, progress: Progress | None = None) -> Ex
     """Exécute l'extraction complète. Toutes les erreurs prévues sont `UmmahAudioError`."""
     progress = progress or Progress()
     watch = Stopwatch()
-    out_dir = Path(options.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
+
+    # Contrôle avant toute écriture : FFmpeg tronque un fichier de sortie dès qu'il
+    # l'ouvre, donc vérifier après coup ne servirait à rien.
+    out_dir = ensure_writable_directory(options.out_dir)
+    produced = [out_dir / name
+                for name in (COMMON_NAME, A_ONLY_NAME, B_ONLY_NAME, METADATA_NAME)]
+    ensure_distinct_outputs(produced)
+    ensure_inputs_untouched([options.input_a, options.input_b], produced)
 
     with Workspace(options.workspace_dir) as workspace:
         progress.stage("Décodage des entrées")

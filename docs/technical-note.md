@@ -43,7 +43,26 @@ compresseur piloté par la voix : tout cela est corrélé entre les deux version
 sera capté comme commun. « Cohérence élevée » ne veut pas dire « musique et
 bruitages ».
 
-## 2. Décodage et canaux
+## 2. Protection des fichiers d'entrée
+
+Les entrées sont **uniquement lues**. `ffprobe` les inspecte, `ffmpeg` les décode vers
+une copie temporaire de l'espace de travail, et c'est cette copie — cartographiée en
+lecture seule — que le traitement utilise. Aucun chemin d'entrée n'est ouvert en
+écriture, renommé ou déplacé.
+
+Le seul risque réel était indirect : rien n'empêchait un chemin de **sortie** de
+désigner un fichier d'**entrée**. FFmpeg écrit avec `-y` et tronque le fichier dès
+l'ouverture, donc l'entrée aurait été détruite avant même le premier bloc traité.
+`ummahverse_audio.paths` compare donc les chemins **avant toute écriture**, en
+résistant aux formes d'aliasing : chemins relatifs, `..`, liens symboliques (résolus),
+liens durs (`os.path.samefile`) et casse sur les systèmes insensibles à la casse. Deux
+sorties identiques sont refusées de la même manière, et un dossier de sortie
+inutilisable produit un message explicite plutôt qu'une erreur système.
+
+Écrire dans le dossier qui contient les entrées reste autorisé : seul l'écrasement
+d'un fichier précis est refusé.
+
+## 3. Décodage et canaux
 
 * `ffprobe` liste les flux audio ; **le choix est explicite** dès qu'il y en a
   plusieurs (`--stream-a`, `--stream-b`, `--stream`, ou la liste de l'interface).
@@ -62,7 +81,7 @@ bruitages ».
   (estimée sur une somme mono servant uniquement à l'analyse) et un `H(f)` propre à
   chaque canal.
 
-## 3. Alignement
+## 4. Alignement
 
 ### Convention de signe
 
@@ -116,7 +135,7 @@ elle est absorbée bloc par bloc, mais un rééchantillonnage des sources reste
 préférable. Pas de DTW libre : un alignement élastique piloté par les dialogues
 déformerait précisément ce qu'on cherche à comparer.
 
-## 4. Transformation entre versions : `H(f)`
+## 5. Transformation entre versions : `H(f)`
 
 `H(f)` est estimé **uniquement sur les cases temps-fréquence fiables**, définies par
 une cohérence quadratique locale `γ² ≥ 0,9` — les cases où le commun domine, donc peu
@@ -143,7 +162,7 @@ Biais assumé : sélectionner les cases sur la cohérence mesurée dans les mêm
 favorise les cases où le commun domine — c'est l'effet recherché, mais cela surestime
 la fiabilité affichée.
 
-## 5. Estimation du commun
+## 6. Estimation du commun
 
 STFT par défaut : fenêtre de Hann périodique de **8192 échantillons** (171 ms à
 48 kHz), pas de **2048** (recouvrement 75 %), via `scipy.signal.ShortTimeFFT`. La
@@ -199,7 +218,7 @@ Une annulation adaptative peut effacer une voix ; cette borne et la contrainte s
 (module minimum, phase de A) et `coherence-mask` (`Ĉ = γ²·A`) restent disponibles et
 sont comparées dans [results.md](results.md) et dans la suite de tests elle-même.
 
-## 6. Résidus et reconstruction
+## 7. Résidus et reconstruction
 
 Le commun est estimé dans le **repère de A**. Puis :
 
@@ -221,7 +240,7 @@ couverture ; le poids cumulé y tombe sous `WEIGHT_FLOOR` et la même politique
 s'applique. Ces intervalles sont listés dans les métadonnées
 (`outputs.measurements.*.untreated_ranges`). Rien n'est extrapolé.
 
-## 7. Traitement par blocs et mémoire
+## 8. Traitement par blocs et mémoire
 
 * Blocs de **6 s** (`--block-seconds`), avec une **marge d'analyse** de deux fenêtres
   de chaque côté (les bords d'une STFT sont mal estimés) et un **fondu croisé** de
@@ -239,7 +258,7 @@ s'applique. Ces intervalles sont listés dans les métadonnées
   fichiers — et `tests/test_memory.py` le vérifie.
 * Disque temporaire : ≈ 1,4 Mio par seconde d'audio stéréo, supprimé à la fin.
 
-## 8. Réutilisation du commun : `subtract`
+## 9. Réutilisation du commun : `subtract`
 
 `subtract` ne lit **ni A ni B** : `common.wav`, `common.json` et la nouvelle piste
 suffisent. C'est vérifié par un test qui déplace A et B hors d'atteinte avant de
@@ -261,7 +280,7 @@ moyen le plus rapide de faire disparaître la voix de la nouvelle langue en croy
 retirer la musique. Le rapport JSON donne la transformation appliquée, le gain et une
 confiance locale par bloc, et les zones non traitées.
 
-## 9. Format des métadonnées
+## 10. Format des métadonnées
 
 `common.json` (`operation: "extract"`) est le contrat entre les deux commandes.
 
@@ -296,7 +315,7 @@ Trois grandeurs, toutes calculées, aucune inventée :
 Aucune n'est une probabilité de bonne séparation. Une valeur élevée signifie « les
 deux versions se ressemblent ici », pas « le contenu extrait est de la musique ».
 
-## 10. Mesures objectives
+## 11. Mesures objectives
 
 `ummahverse_audio.metrics` évalue une sortie par **décomposition aux moindres carrés
 conjointe** sur les sources vraies du jeu synthétique :
@@ -312,7 +331,7 @@ celle de `y`, c'est-à-dire ce qu'aucune source vraie n'explique. La décomposit
 projections séparées se contamineraient. S'y ajoutent le SI-SDR usuel et un SNR sans
 ajustement d'échelle.
 
-## 11. Ce qui n'est pas fait ici
+## 12. Ce qui n'est pas fait ici
 
 Le **retrait de la musique à l'intérieur du commun** n'est pas implémenté : c'est
 l'étape suivante d'UmmahVerse, avec l'outil existant, suivie de la recombinaison des

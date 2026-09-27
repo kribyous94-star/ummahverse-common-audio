@@ -175,6 +175,61 @@ def test_cancelling_a_long_run_stops_cleanly(window, tmp_path):
     assert not tab.runner.busy
 
 
+def test_extract_refuses_an_output_that_would_overwrite_an_input(window, tmp_path,
+                                                                 monkeypatch):
+    """Refus au clic, avant tout traitement : l'entrée ne doit pas être touchée."""
+    import hashlib
+
+    scene = build_scene(tmp_path / "source", seconds=3.0)
+    collision = tmp_path / "sorties" / "common.wav"
+    collision.parent.mkdir(parents=True)
+    collision.write_bytes(scene.a.read_bytes())
+    before = hashlib.sha256(collision.read_bytes()).hexdigest()
+
+    shown = []
+    monkeypatch.setattr("ummahverse_audio.gui.main_window.QMessageBox.warning",
+                        lambda *args, **kwargs: shown.append(args[2]))
+    tab = window.extract_tab
+    tab.field_a.set_path(collision)
+    tab.field_b.set_path(scene.b)
+    tab.field_out.set_path(tmp_path / "sorties")
+    tab._extract()
+
+    assert shown and "jamais modifiés" in shown[0]
+    assert not tab.runner.busy, "aucun traitement ne doit démarrer"
+    assert hashlib.sha256(collision.read_bytes()).hexdigest() == before
+    assert tab.extract_button.isEnabled()
+
+
+def test_subtract_refuses_to_write_over_its_input(window, scene, extracted, monkeypatch):
+    import hashlib
+
+    before = hashlib.sha256(scene.third.read_bytes()).hexdigest()
+    shown = []
+    monkeypatch.setattr("ummahverse_audio.gui.main_window.QMessageBox.warning",
+                        lambda *args, **kwargs: shown.append(args[2]))
+    tab = window.subtract_tab
+    tab.field_common.set_path(extracted.common_path)
+    tab.field_metadata.set_path(extracted.metadata_path)
+    tab.field_input.set_path(scene.third)
+    tab.field_output.set_path(scene.third)
+    tab._subtract()
+
+    assert shown and "jamais modifiés" in shown[0]
+    assert not tab.runner.busy
+    assert hashlib.sha256(scene.third.read_bytes()).hexdigest() == before
+    assert tab.subtract_button.isEnabled()
+
+
+def test_header_states_that_inputs_are_never_modified(window):
+    from PySide6.QtWidgets import QLabel
+
+    texts = [child.text() for child in window.findChildren(QLabel)]
+    banner = " ".join(texts)
+    assert "jamais modifiés" in banner
+    assert "uniquement lus" in banner
+
+
 def test_engine_error_is_shown_as_a_readable_message(window, tmp_path, monkeypatch):
     """Deux pistes incompatibles : message explicite, pas de trace Python."""
     stereo = build_scene(tmp_path / "stereo", seconds=3.0, channels=2)

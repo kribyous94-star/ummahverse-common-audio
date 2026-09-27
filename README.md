@@ -11,6 +11,13 @@ Il existe deux façons de s'en servir, sur **le même moteur** :
 * une **application de bureau** en français (Ubuntu et Windows) ;
 * une **ligne de commande**, pour l'automatisation et les tests.
 
+> **Vos fichiers d'entrée ne sont jamais modifiés.** Les pistes que vous désignez
+> (première langue, seconde langue, `common.wav`, troisième langue) sont uniquement
+> **lues**. Tout ce qui est écrit va dans le dossier de sortie que vous choisissez, ou
+> dans l'espace de travail temporaire. Si une sortie désignait l'un de vos fichiers
+> d'entrée, l'opération est **refusée avant la moindre écriture**. Voir
+> [Vos fichiers d'entrée ne sont jamais modifiés](#vos-fichiers-dentrée-ne-sont-jamais-modifiés).
+
 > **Ce que ce POC ne promet pas.** Deux mixages ne suffisent pas à déterminer
 > exactement trois sources. `a_only.wav` et `b_only.wav` sont des **résidus estimés**,
 > pas des voix isolées garanties. Tout ce qui est réellement identique dans les deux
@@ -29,16 +36,17 @@ l'étape suivante d'UmmahVerse, avec votre outil existant.
 2. [Installation sur Ubuntu](#installation-sur-ubuntu)
 3. [Installation sur Windows](#installation-sur-windows)
 4. [Tout reste dans le dossier](#tout-reste-dans-le-dossier)
-5. [Démarrer l'interface graphique](#démarrer-linterface-graphique)
-6. [Parcours complet : deux langues, puis une troisième](#parcours-complet--deux-langues-puis-une-troisième)
-7. [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
-8. [Les fichiers produits](#les-fichiers-produits)
-9. [Quand l'outil refuse ou prévient](#quand-loutil-refuse-ou-prévient)
-10. [Limites de la séparation](#limites-de-la-séparation)
-11. [Performances](#performances)
-12. [Dépannage](#dépannage)
-13. [Tests et mesures](#tests-et-mesures)
-14. [Documentation complémentaire](#documentation-complémentaire)
+5. [Vos fichiers d'entrée ne sont jamais modifiés](#vos-fichiers-dentrée-ne-sont-jamais-modifiés)
+6. [Démarrer l'interface graphique](#démarrer-linterface-graphique)
+7. [Parcours complet : deux langues, puis une troisième](#parcours-complet--deux-langues-puis-une-troisième)
+8. [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
+9. [Les fichiers produits](#les-fichiers-produits)
+10. [Quand l'outil refuse ou prévient](#quand-loutil-refuse-ou-prévient)
+11. [Limites de la séparation](#limites-de-la-séparation)
+12. [Performances](#performances)
+13. [Dépannage](#dépannage)
+14. [Tests et mesures](#tests-et-mesures)
+15. [Documentation complémentaire](#documentation-complémentaire)
 
 ## Prérequis
 
@@ -157,6 +165,39 @@ pleinement fonctionnelle et le script le dit clairement.
 Les anciens scripts `scripts/bootstrap.*` restent présents (ils font partie du
 contrat d'origine) mais sont plus sommaires : ils laissent le cache pip dans votre
 répertoire personnel. **Préférez `install.sh` / `install.ps1`.**
+
+## Vos fichiers d'entrée ne sont jamais modifiés
+
+C'est une garantie, pas une intention :
+
+* les entrées sont **ouvertes en lecture seule**. Le décodage produit une copie
+  temporaire dans l'espace de travail ; le traitement ne touche que cette copie ;
+* **rien n'est écrit à côté** d'un fichier d'entrée, ni renommé, ni déplacé. Les dates
+  de modification ne changent pas ;
+* un traitement fonctionne même si les entrées sont en **lecture seule** sur le disque
+  ou sur un support non inscriptible ;
+* si un chemin de **sortie** désignait un fichier d'**entrée**, l'opération est
+  **refusée avant toute écriture** — FFmpeg tronque un fichier de sortie dès qu'il
+  l'ouvre, un contrôle a posteriori serait inutile. La détection couvre les chemins
+  relatifs, les liens symboliques, les liens durs et les différences de casse ;
+* deux sorties ne peuvent pas non plus désigner le même fichier.
+
+Écrire **dans le dossier qui contient vos entrées** reste permis : seul l'écrasement
+d'un fichier précis est refusé.
+
+```text
+$ ummahverse_audio subtract --common res/common.wav --input film_EN.wav       --output film_EN.wav --metadata res/common.json
+Erreur : La sortie « film_EN.wav » désigne le fichier d'entrée « film_EN.wav ».
+Les fichiers d'entrée ne sont jamais modifiés : choisissez un autre nom ou un autre
+dossier de sortie.
+```
+
+Dans l'interface, le refus arrive **au clic**, avant que le traitement ne démarre.
+
+Cette garantie est verrouillée par les tests de `tests/test_inputs_are_read_only.py` :
+empreinte SHA-256, taille et date de modification des entrées relevées avant et après
+chaque opération, traitement sur des fichiers en lecture seule, et refus de chaque
+forme de collision.
 
 ## Démarrer l'interface graphique
 
@@ -358,6 +399,8 @@ Les trois confiances sont **définies**, jamais inventées : voir
 
 **Refus** (rien n'est produit, le message dit quoi faire) :
 
+* **une sortie qui désignerait un fichier d'entrée**, ou deux sorties identiques ;
+* **un dossier de sortie** inaccessible en écriture, ou qui est en fait un fichier ;
 * **nombres de canaux différents** entre A et B — aucun downmix automatique, jamais ;
 * **agencement de canaux inconnu au-delà de la stéréo** (6 canaux non déclarés, par
   exemple) : l'ordre réel est ambigu, relancez avec `--allow-unknown-layout` si vous
@@ -434,13 +477,14 @@ Mesuré sur Ubuntu 24.04, Python 3.12, 16 cœurs, entrées WAV stéréo 48 kHz
 | Fenêtre vide ou erreur Qt sur un serveur sans écran | l'interface a besoin d'un environnement graphique ; en SSH utilisez la CLI |
 | Beaucoup de « zones non comparables » | montages différents, ou une version contient des plans absents de l'autre |
 | Résidu qui « pompe » ou voix abîmée | baissez `--magnitude-cap`, ou essayez `--transfer gain` ; voir [docs/limitations.md](docs/limitations.md) |
-| Erreur de permissions sur le dossier de sortie | choisissez un dossier où vous pouvez écrire ; l'outil ne modifie jamais les entrées |
+| `Le dossier de sortie n'est pas accessible en écriture` | choisissez un dossier où vous pouvez écrire ; l'outil ne modifie jamais les entrées |
+| `La sortie « … » désigne le fichier d'entrée « … »` | donnez un autre nom de sortie ou un autre dossier : vos entrées sont protégées |
 | Plus d'espace disque en cours de traitement | placez `--workspace-dir` sur un volume plus grand |
 
 ## Tests et mesures
 
 ```bash
-# Suite complète (113 tests, ~28 s)
+# Suite complète (137 tests, ~30 s)
 .venv/bin/python -m pytest -q
 
 # Un domaine à la fois

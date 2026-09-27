@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
                                QVBoxLayout, QWidget)
 
 from ..analyze import run_analysis
-from ..errors import UmmahAudioError
+from ..errors import OutputCollisionError, UmmahAudioError
 from ..extract import ExtractOptions, run_extract
 from ..separate import METHODS
 from ..subtract import SubtractOptions, default_report_path, run_subtract
@@ -212,7 +212,7 @@ class ExtractTab(OperationPanel):
             QMessageBox.warning(self, "Dossier manquant",
                                 "Choisissez un dossier de sortie.")
             return None
-        return ExtractOptions(
+        options = ExtractOptions(
             input_a=self.field_a.path, input_b=self.field_b.path,
             out_dir=self.field_out.path,
             stream_a=self.stream_a.selected_index, stream_b=self.stream_b.selected_index,
@@ -220,6 +220,27 @@ class ExtractTab(OperationPanel):
             max_offset_s=self.max_offset.value(),
             allow_unknown_layout=self.allow_unknown.isChecked(),
         )
+        return options if self._outputs_are_safe(options) else None
+
+    def _outputs_are_safe(self, options: ExtractOptions) -> bool:
+        """Refuse tout de suite si une sortie écraserait A ou B.
+
+        Le moteur refuse de toute façon, mais l'utilisateur mérite de l'apprendre au
+        clic plutôt qu'après le décodage.
+        """
+        from ..extract import A_ONLY_NAME, B_ONLY_NAME, COMMON_NAME, METADATA_NAME
+        from ..paths import ensure_inputs_untouched
+
+        out_dir = Path(options.out_dir)
+        produced = [out_dir / name for name in
+                    (COMMON_NAME, A_ONLY_NAME, B_ONLY_NAME, METADATA_NAME)]
+        try:
+            ensure_inputs_untouched([options.input_a, options.input_b], produced)
+        except OutputCollisionError as exc:
+            QMessageBox.warning(self, "Les entrées ne sont jamais modifiées",
+                                exc.user_message())
+            return False
+        return True
 
     def _guard(self) -> bool:
         if self.runner.busy:
@@ -401,9 +422,28 @@ class SubtractTab(OperationPanel):
             stream=self.stream_input.selected_index, adapt=self.adapt.currentData(),
             export_adapted_common=self.export_adapted.isChecked(),
         )
+        if not self._outputs_are_safe(options):
+            return
         self.subtract_button.setEnabled(False)
         self._begin("Soustraction du commun…")
         self.runner.start("subtract", lambda progress: run_subtract(options, progress))
+
+    def _outputs_are_safe(self, options: SubtractOptions) -> bool:
+        """Refuse tout de suite si la sortie écraserait le commun ou la piste d'entrée."""
+        from ..paths import ensure_inputs_untouched
+
+        output = Path(options.output)
+        produced = [output, default_report_path(output)]
+        if options.export_adapted_common:
+            produced.append(output.with_name(output.stem + "_adapted_common.wav"))
+        try:
+            ensure_inputs_untouched(
+                [options.common, options.input_c, options.metadata], produced)
+        except OutputCollisionError as exc:
+            QMessageBox.warning(self, "Les entrées ne sont jamais modifiées",
+                                exc.user_message())
+            return False
+        return True
 
     def _finished(self, outcome) -> None:
         self.subtract_button.setEnabled(True)
@@ -469,9 +509,10 @@ class MainWindow(QWidget):
         self.tabs.addTab(self.extract_tab, "1 · Deux langues → commun")
         self.tabs.addTab(self.subtract_tab, "2 · Réutiliser le commun")
         header = QLabel(
-            "Les fichiers restent sur cet ordinateur. Les sorties « only » sont des "
-            "résidus estimés, pas des voix isolées garanties : voir les limites dans le "
-            "rapport JSON et le README."
+            "Les fichiers restent sur cet ordinateur et <b>les fichiers d'entrée ne "
+            "sont jamais modifiés</b> : ils sont uniquement lus, tout est écrit dans le "
+            "dossier de sortie. Les sorties « only » sont des résidus estimés, pas des "
+            "voix isolées garanties : voir les limites dans le rapport JSON et le README."
         )
         header.setWordWrap(True)
         header.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

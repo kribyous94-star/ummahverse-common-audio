@@ -38,6 +38,14 @@ class AlignmentError(UmmahAudioError):
     """Alignement impossible ou non fiable sur la totalité du signal."""
 
 
+class OutputCollisionError(UmmahAudioError):
+    """Une sortie écraserait un fichier d'entrée, ou une autre sortie.
+
+    Les fichiers fournis en entrée ne sont jamais modifiés : la demande est refusée
+    avant que quoi que ce soit ne soit écrit.
+    """
+
+
 class MetadataError(UmmahAudioError):
     """`common.json` absent, illisible ou de version incompatible."""
 

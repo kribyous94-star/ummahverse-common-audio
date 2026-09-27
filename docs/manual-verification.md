@@ -22,11 +22,12 @@ présentée comme faite sans l'avoir été.
 | Message d'erreur si FFmpeg manque | ✅ réussi (test automatisé) | ⬜ **non testé** |
 | Fenêtre réactive pendant le traitement | ✅ réussi (test automatisé) | ⬜ **non testé** |
 | Chemins avec espaces et accents | ✅ réussi (test automatisé) | ⬜ **non testé** |
-| Dossier de sortie non vide | ✅ réussi (écrasement, voir plus bas) | ⬜ **non testé** |
-| Erreur de permissions | ⬜ **non testé** | ⬜ **non testé** |
+| Dossier de sortie non vide | ✅ réussi (écrasement des sorties, voir plus bas) | ⬜ **non testé** |
+| Fichiers d'entrée jamais modifiés | ✅ réussi, mesuré | ⬜ **non testé** |
+| Erreur de permissions | ✅ réussi (dossier en lecture seule refusé) | ⬜ **non testé** |
 | CLI `extract` / `subtract` / `probe` / `analyze` | ✅ réussi | ⬜ **non testé** |
 | `bash scripts/smoke.sh` | ✅ réussi | s. o. (script bash) |
-| Suite `pytest` | ✅ réussi, 113 tests | ⬜ **non testé** |
+| Suite `pytest` | ✅ réussi, 137 tests | ⬜ **non testé** |
 | **Écoute réelle sur un film** | ⬜ **non fait** | ⬜ **non fait** |
 
 ## 1. Ubuntu — ce qui a été exécuté
@@ -115,6 +116,27 @@ Relancer `extract` vers un dossier contenant déjà des sorties **écrase** `com
 `a_only.wav`, `b_only.wav` et `common.json` sans demander confirmation (`ffmpeg -y`).
 Comportement attendu pour un POC scriptable ; si vous tenez à vos résultats
 précédents, utilisez un dossier différent.
+
+En revanche, **aucun fichier d'entrée ne peut être écrasé** : si l'un d'eux se trouve
+dans le dossier de sortie et porte le nom d'une sortie, l'opération est refusée avant
+toute écriture.
+
+### Fichiers d'entrée jamais modifiés
+
+Vérifié par mesure, pas par principe :
+
+| Contrôle | Résultat |
+|---|---|
+| Empreinte SHA-256, taille et date de modification de A et B après une extraction | **inchangées** |
+| Idem pour `common.wav`, `common.json` et la troisième langue après une soustraction | **inchangées** |
+| Traitement avec des entrées en **lecture seule** (`chmod 444`) | **réussit** |
+| `--output` égal à `--input` | **refusé**, entrée intacte (vérifié aussi avant correction : elle était bien écrasée) |
+| Sortie désignant une entrée via un lien symbolique, un lien dur ou un chemin relatif | **refusée** |
+| Deux sorties désignant le même fichier | **refusées** |
+| Dossier de sortie en lecture seule | **refusé** avec un message explicite |
+
+Dans l'interface, le refus arrive **au clic** : aucun traitement ne démarre, le bouton
+reste actif et l'entrée n'est pas touchée.
 
 ## 2. Windows — procédure à exécuter
 

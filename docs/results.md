@@ -40,7 +40,7 @@ dispose de moins de contexte. Les canaux sont évalués ensemble, sans remixage.
 
 Chaque sortie est décomposée par **moindres carrés conjoints** sur les sources vraies
 (`commun`, `voix A`, `voix B`) — voir
-[technical-note.md § 10](technical-note.md#10-mesures-objectives). Les coefficients sont
+[technical-note.md § 11](technical-note.md#11-mesures-objectives). Les coefficients sont
 donnés en dB :
 
 | Colonne | Signification | Bon résultat |
@@ -97,7 +97,7 @@ trompeur.
   versions. Le mode `band` sert à du matériel réel ; il ne coûte rien sur celui-ci.
 * *Correction de biais* : **mesurée comme défavorable** (−7,2 dB d'annulation de la
   musique), donc désactivée par défaut alors que la théorie du moyennage la suggérait.
-  L'explication est dans [technical-note.md § 5](technical-note.md#puissance-commune).
+  L'explication est dans [technical-note.md § 6](technical-note.md#puissance-commune).
 
 ## Estimation du gain entre versions
 
@@ -209,7 +209,7 @@ long1800 maxrss=411052 kB
 ## Suite de tests
 
 ```
-113 tests, ~28 s   (dont 11 tests d'interface graphique, en mode « offscreen »)
+137 tests, ~30 s   (dont 11 tests d'interface graphique, en mode « offscreen »)
 ```
 
 | Fichier | Ce qu'il quantifie |
@@ -224,6 +224,7 @@ long1800 maxrss=411052 kB
 | `test_cli.py` | contrat CLI exact, scripts shell, concordance README / code |
 | `test_gui.py` | traitement hors thread d'interface, annulation propre, erreurs lisibles, FFmpeg absent, glisser-déposer, choix de flux |
 | `test_install_scripts.py` | confinement des fichiers temporaires dans le dossier, validité et cohérence de `install.*` et `run.*`, redirection du cache pip |
+| `test_inputs_are_read_only.py` | entrées inchangées (empreinte, taille, date) après chaque opération, traitement sur fichiers en lecture seule, refus de toute sortie qui les écraserait |
 
 ## Ce que ces chiffres ne disent pas
 

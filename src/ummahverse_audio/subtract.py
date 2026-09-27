@@ -24,6 +24,8 @@ from .errors import IncompatibleLayoutError, UmmahAudioError
 from .ffmpeg_tools import describe_environment
 from .metadata import (base_payload, common_reference, limitations_notice,
                        load_common_metadata, stream_descriptor, write_json)
+from .paths import (ensure_distinct_outputs, ensure_inputs_untouched,
+                    ensure_writable_directory)
 from .perf import Stopwatch
 from .progress import Progress, SubProgress
 from .sinks import AccumulatorSink
@@ -85,8 +87,16 @@ def run_subtract(options: SubtractOptions, progress: Progress | None = None) -> 
     watch = Stopwatch()
     warnings: list[str] = []
     output = Path(options.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
+    ensure_writable_directory(output.parent)
     report_path = Path(options.report) if options.report else default_report_path(output)
+
+    # Contrôle avant toute écriture : le commun, la nouvelle piste et les métadonnées
+    # sont des entrées, elles ne doivent jamais servir de cible.
+    produced = [output, report_path]
+    if options.export_adapted_common:
+        produced.append(output.with_name(output.stem + "_adapted_common.wav"))
+    ensure_distinct_outputs(produced)
+    ensure_inputs_untouched([options.common, options.input_c, options.metadata], produced)
 
     reference: dict = {}
     source_metadata: dict | None = None
