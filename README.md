@@ -534,7 +534,7 @@ Mesuré sur Ubuntu 24.04, Python 3.12, 16 cœurs, entrées WAV stéréo 48 kHz
 ## Tests et mesures
 
 ```bash
-# Suite complète (154 tests, ~75 s)
+# Suite complète (155 tests, ~50 s)
 .venv/bin/python -m pytest -q
 
 # Un domaine à la fois

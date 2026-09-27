@@ -296,3 +296,25 @@ def test_drag_and_drop_sets_the_path(window, scene):
                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     window.extract_tab.field_a.dropEvent(event)
     assert window.extract_tab.field_a.path == scene.a
+
+
+def test_scout_button_reports_the_verdict_in_the_journal(window, scene, tmp_path):
+    """Le repérage doit être accessible depuis l'interface, et conclure clairement."""
+    tab = window.extract_tab
+    tab.field_a.set_path(scene.a)
+    tab.field_b.set_path(scene.b)
+    tab.field_out.set_path(tmp_path / "sorties")
+    outcomes = []
+    tab.runner.finished.connect(outcomes.append)
+    tab._scout()
+    assert wait_for(lambda: bool(outcomes))
+    assert outcomes[0].error is None, outcomes[0].error
+    journal = tab.log.toPlainText()
+    assert "fenêtres analysées" in journal
+    assert "Cohérence" in journal
+    # Le verdict, avec son marqueur, doit figurer dans le journal.
+    assert any(f"[{m}]" in journal for m in ("OK", "PARTIEL", "FAIBLE", "ÉCHEC"))
+    # Aucun fichier audio ne doit avoir été écrit.
+    assert not list((tmp_path / "sorties").glob("*.wav")) \
+        if (tmp_path / "sorties").exists() else True
+    assert tab.scout_button.isEnabled() and tab.extract_button.isEnabled()

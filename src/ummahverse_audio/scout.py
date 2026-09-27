@@ -79,12 +79,12 @@ class ScoutReport:
         values = np.array([w.coherence for w in self.windows])
         total = self.windows[-1].end_s
         lines = [
-            f"{len(self.windows)} fenêtres analysées sur {total / 60:.0f} min",
+            f"{len(self.windows)} fenêtres analysées sur {_duration(total)}",
             f"Cohérence : médiane {np.median(values) * 100:.1f} %, "
             f"90e centile {np.percentile(values, 90) * 100:.1f} %, "
             f"maximum {values.max() * 100:.1f} %",
             f"Durée exploitable (cohérence ≥ {WEAK * 100:.0f} %) : "
-            f"{self.usable_seconds / 60:.1f} min sur {total / 60:.0f} "
+            f"{_duration(self.usable_seconds)} sur {_duration(total)} "
             f"({100 * self.usable_seconds / max(total, 1):.1f} %)",
         ]
         best = self.ranges(minimum=PARTIAL)
@@ -102,6 +102,11 @@ class ScoutReport:
         else:
             lines.append("Aucune plage exploitable trouvée.")
         return lines
+
+
+def _duration(seconds: float) -> str:
+    """Durée lisible : secondes sous la minute, minutes au-delà."""
+    return f"{seconds:.0f} s" if seconds < 90 else f"{seconds / 60:.1f} min"
 
 
 def _clock(seconds: float) -> str:
@@ -137,11 +142,18 @@ def run_scout(input_a: Path, input_b: Path, stream_a: int | None = None,
             raise UmmahAudioError(
                 "Entrées trop courtes pour un repérage ; utilisez « analyze ».")
 
-        window = max(int(window_s * analysis_rate), analysis_rate)
-        search = max(int(LOCAL_SEARCH_S * analysis_rate), 8)
         usable = min(track_a.size, track_b.size)
+        # Sur un extrait court, une fenêtre de 20 s n'entrerait pas : on la réduit pour
+        # obtenir une dizaine de points de mesure, jamais moins d'une seconde.
+        effective_window_s = min(window_s, max(usable / analysis_rate / 10.0, 1.0))
+        if effective_window_s < window_s:
+            warnings.append(
+                f"Fenêtre de repérage ramenée à {effective_window_s:.1f} s "
+                f"(au lieu de {window_s:.0f} s) : les entrées sont courtes.")
+        window = max(int(effective_window_s * analysis_rate), analysis_rate)
+        search = max(int(LOCAL_SEARCH_S * analysis_rate), 8)
         windows: list[ScoutWindow] = []
-        for start in range(0, usable - window, window):
+        for start in range(0, max(usable - window, 1), window):
             progress.step(start / max(usable, 1), "repérage")
             piece_a = track_a[start:start + window]
             low = max(start - search, 0)
@@ -154,7 +166,9 @@ def run_scout(input_a: Path, input_b: Path, stream_a: int | None = None,
             else:
                 x, y = piece_a[-delay:], track_b[start:start + window + delay]
             length = min(x.size, y.size)
-            if length < analysis_rate:
+            # Le recouvrement restant doit couvrir l'essentiel de la fenêtre ; un seuil
+            # absolu écarterait toutes les fenêtres quand elles sont courtes.
+            if length < max(window // 2, 256):
                 continue
             x, y = x[:length], y[:length]
             freqs, spectrum = welch_coherence(x, y, fs=analysis_rate,
@@ -183,7 +197,7 @@ def run_scout(input_a: Path, input_b: Path, stream_a: int | None = None,
         payload = base_payload("scout", describe_environment())
         payload.update({
             "inputs": {"a": stream_descriptor(audio_a), "b": stream_descriptor(audio_b)},
-            "window_s": window_s,
+            "window_s": effective_window_s,
             "analysis_rate": analysis_rate,
             "coherence_thresholds": {"absente": ABSENT, "faible": WEAK,
                                      "partielle": PARTIAL},

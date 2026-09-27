@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
                                QVBoxLayout, QWidget)
 
 from ..analyze import run_analysis
+from ..scout import run_scout
 from ..errors import OutputCollisionError, UmmahAudioError
 from ..extract import ExtractOptions, run_extract
 from ..separate import METHODS
@@ -167,6 +168,11 @@ class ExtractTab(OperationPanel):
         self.allow_unknown = QCheckBox(
             "Accepter un agencement de canaux inconnu (appariement dans l'ordre du fichier)")
 
+        self.scout_button = QPushButton("Repérer les zones exploitables")
+        self.scout_button.setToolTip(
+            "Balaie tout le film et indique où les deux versions partagent une bande "
+            "commune. N'écrit aucun fichier.")
+        self.scout_button.clicked.connect(self._scout)
         self.analyze_button = QPushButton("Analyser / synchroniser")
         self.analyze_button.clicked.connect(self._analyze)
         self.extract_button = QPushButton("Extraire le commun et les résidus")
@@ -187,6 +193,7 @@ class ExtractTab(OperationPanel):
         grid.addRow(self.allow_unknown)
 
         buttons = QHBoxLayout()
+        buttons.addWidget(self.scout_button)
         buttons.addWidget(self.analyze_button)
         buttons.addWidget(self.extract_button)
         buttons.addStretch(1)
@@ -257,6 +264,20 @@ class ExtractTab(OperationPanel):
         self._begin("Analyse et synchronisation…")
         self.runner.start("analyze", lambda progress: run_analysis(options, progress))
 
+    def _scout(self) -> None:
+        """Repérage : où, dans le film, la séparation a-t-elle une chance ?"""
+        options = self._collect()
+        if options is None or not self._guard():
+            return
+        self._set_busy(True)
+        self._begin("Repérage des zones à bande commune…")
+        self.runner.start("scout", lambda progress: run_scout(
+            input_a=options.input_a, input_b=options.input_b,
+            stream_a=options.stream_a, stream_b=options.stream_b,
+            sample_rate=options.sample_rate,
+            allow_unknown_layout=options.allow_unknown_layout,
+            workspace_dir=options.workspace_dir, progress=progress))
+
     def _extract(self) -> None:
         options = self._collect()
         if options is None or not self._guard():
@@ -266,6 +287,7 @@ class ExtractTab(OperationPanel):
         self.runner.start("extract", lambda progress: run_extract(options, progress))
 
     def _set_busy(self, busy: bool) -> None:
+        self.scout_button.setEnabled(not busy)
         self.analyze_button.setEnabled(not busy)
         self.extract_button.setEnabled(not busy)
 
@@ -280,16 +302,28 @@ class ExtractTab(OperationPanel):
             self.log.append(f"ERREUR : {outcome.error}")
             QMessageBox.critical(self, "Échec du traitement", outcome.error)
             return
+        if outcome.kind == "scout":
+            report = outcome.result
+            self._end("Repérage terminé.")
+            for line in report.summary_lines():
+                self.log.append("  " + line)
+            self._log_verdict(report.payload["common_bed_verdict"])
+            self._log_warnings(report.warnings)
+            return
         if outcome.kind == "analyze":
             report = outcome.result
             self._end("Analyse terminée.")
             for line in report.summary_lines():
                 self.log.append("  " + line)
+            if report.verdict is not None:
+                self._log_verdict(report.verdict.as_dict())
             self._log_warnings(report.warnings)
             return
         result = outcome.result
         self._result = result
         self._end("Extraction terminée.")
+        if getattr(result, "verdict", None) is not None:
+            self._log_verdict(result.verdict.as_dict())
         self.log.append("Fichiers produits :")
         for path in result.outputs:
             self.log.append(f"  {path}")
@@ -299,6 +333,17 @@ class ExtractTab(OperationPanel):
         self.open_report_button.setEnabled(True)
         if callable(self.on_extract_done):
             self.on_extract_done(result)
+
+    def _log_verdict(self, payload: dict) -> None:
+        """Le verdict est l'information la plus importante du journal."""
+        marker = {"absente": "ÉCHEC", "faible": "FAIBLE",
+                  "partielle": "PARTIEL", "bonne": "OK"}.get(payload["level"], "")
+        self.log.append("")
+        self.log.append(f"[{marker}] {payload['headline']}")
+        for key in ("detail", "advice"):
+            if payload.get(key):
+                self.log.append(f"  {payload[key]}")
+        self.log.append("")
 
     def _log_quality(self, metadata: dict) -> None:
         alignment = metadata["alignment"]
