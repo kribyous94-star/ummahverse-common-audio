@@ -8,7 +8,9 @@ présentée comme faite sans l'avoir été.
 
 | Vérification | Ubuntu 24.04 | Windows |
 |---|---|---|
-| Installation (`bootstrap`) | ✅ réussi | ⬜ **non testé** |
+| Installation (`install.sh` / `install.bat`) | ✅ réussi | ⬜ **non testé** |
+| Installation confinée (rien hors du dossier) | ✅ réussi, mesuré | ⬜ **non testé** |
+| Lancement par `run.sh` / `run.bat` | ✅ réussi | ⬜ **non testé** |
 | Lancement de l'interface | ✅ réussi | ⬜ **non testé** |
 | Sélection des deux entrées | ✅ réussi | ⬜ **non testé** |
 | Choix explicite du flux audio | ✅ réussi | ⬜ **non testé** |
@@ -24,7 +26,7 @@ présentée comme faite sans l'avoir été.
 | Erreur de permissions | ⬜ **non testé** | ⬜ **non testé** |
 | CLI `extract` / `subtract` / `probe` / `analyze` | ✅ réussi | ⬜ **non testé** |
 | `bash scripts/smoke.sh` | ✅ réussi | s. o. (script bash) |
-| Suite `pytest` | ✅ réussi, 94 tests | ⬜ **non testé** |
+| Suite `pytest` | ✅ réussi, 113 tests | ⬜ **non testé** |
 | **Écoute réelle sur un film** | ⬜ **non fait** | ⬜ **non fait** |
 
 ## 1. Ubuntu — ce qui a été exécuté
@@ -69,6 +71,23 @@ Comportements vérifiés en plus, par les tests automatisés de `tests/test_gui.
 * **FFmpeg absent** : boîte de dialogue avec la commande d'installation ;
 * **glisser-déposer** d'un fichier sur un champ ;
 * **plusieurs flux audio** : liste activée, choix exigé, sélection prise en compte.
+
+### Installation autonome et confinement
+
+`bash install.sh --clean` exécuté depuis une copie neuve du dossier : environnement
+créé en 16 s, moteur et interface vérifiés à l'import. Confinement **mesuré**, et non
+supposé :
+
+| Contrôle | Résultat |
+|---|---|
+| Nombre de fichiers dans `~/.cache/pip` avant / après une installation complète | **4569 / 4569** — inchangé |
+| Fichiers écrits dans le répertoire personnel par un traitement complet | **aucun** (les seuls fichiers touchés venaient d'autres applications) |
+| Répertoires `ummahverse-*` restant dans `/tmp` après traitement | **0** |
+| Contenu de `.cache/workspace/` après un traitement | **vide** (nettoyé à la fin) |
+| Emplacement de tout ce qui est installé | `.venv` 893 Mio, `.cache` 301 Mio — dans le dossier |
+
+`bash run.sh` lance bien l'interface depuis le `.venv` local, et sans session
+graphique affiche le message attendu avec le code de sortie 1.
 
 ### Ligne de commande
 
@@ -127,49 +146,59 @@ $env:UMMAHVERSE_FFPROBE = "C:\ffmpeg\bin\ffprobe.exe"
 
 ```bat
 cd C:\chemin\vers\ummahverse-common-audio
-scripts\bootstrap.bat
-scripts\launch.bat
+install.bat
+run.bat
 ```
 
 ou, depuis PowerShell :
 
 ```powershell
-.\scripts\bootstrap.ps1
-.\scripts\launch.ps1
+.\install.ps1
+.\run.ps1
 ```
 
 ### Scénario à dérouler
 
-1. **Installation** : `bootstrap.bat` se termine sans erreur et crée `.venv\`.
-   Noter la version de Python (`py -3 --version`) et de PySide6.
-2. **FFmpeg manquant** : renommer temporairement `ffmpeg.exe`, lancer `launch.bat`,
+1. **Installation** : `install.bat` se termine sans erreur et crée `.venv\`,
+   `.cache\pip\` et `.install-state`. Noter la version de Python (`py -3 --version`)
+   et de PySide6 affichées par le script.
+2. **Confinement** : relever la taille de `%LOCALAPPDATA%\pip` avant et après
+   l'installation — elle ne doit pas bouger. Vérifier qu'aucun dossier
+   `UmmahVerse` n'apparaît dans `%APPDATA%` ni `%LOCALAPPDATA%`.
+3. **FFmpeg manquant** : renommer temporairement `ffmpeg.exe`, lancer `run.bat`,
    vérifier que le message cite `winget install --id Gyan.FFmpeg` et que l'application
-   se referme proprement. Restaurer.
-3. **Lancement** : `launch.bat` ouvre la fenêtre, deux onglets en français.
-4. **Chemins Windows** : placer les fichiers de test dans
+   se referme proprement. Restaurer. Essayer aussi `install.bat -WithFfmpeg`, qui doit
+   déposer `ffmpeg.exe` et `ffprobe.exe` dans `tools\ffmpeg\` et rendre le système
+   inutile.
+4. **Lancement** : `run.bat` ouvre la fenêtre, deux onglets en français. Tester aussi
+   le double-clic depuis l'explorateur.
+5. **Chemins Windows** : placer les fichiers de test dans
    `D:\Films & Séries\test accentué éàü\` — lettre de lecteur, espaces, esperluette et
    accents. Les sélectionner par « Parcourir… » **et** par glisser-déposer.
-5. **Flux multiples** : préparer un `.mkv` à deux pistes audio
+6. **Flux multiples** : préparer un `.mkv` à deux pistes audio
    (`ffmpeg -i a.wav -i b.wav -map 0:a -map 1:a -c copy deux.mka`) et vérifier que la
    liste s'active et exige un choix.
-6. **Analyser / synchroniser** : noter décalage, dérive, blocs comparables, gains.
-7. **Extraire** : vérifier la production des quatre fichiers, et que la fenêtre reste
+7. **Analyser / synchroniser** : noter décalage, dérive, blocs comparables, gains.
+8. **Extraire** : vérifier la production des quatre fichiers, et que la fenêtre reste
    déplaçable et redimensionnable pendant le calcul.
-8. **Annulation** : sur une entrée d'au moins deux minutes, cliquer « Annuler » à
+9. **Annulation** : sur une entrée d'au moins deux minutes, cliquer « Annuler » à
    mi-parcours ; vérifier qu'aucun `common.wav` ni `a_only.wav` n'est laissé sur le
    disque, et que les boutons redeviennent actifs.
-9. **Dossier de sortie en lecture seule** : viser `C:\Program Files\...` et vérifier que
+10. **Dossier de sortie en lecture seule** : viser `C:\Program Files\...` et vérifier que
    le message d'erreur est compréhensible (c'est le cas **non testé même sous Ubuntu**).
-10. **Soustraction** : onglet 2, vérifier le pré-remplissage puis traiter une troisième
+11. **Soustraction** : onglet 2, vérifier le pré-remplissage puis traiter une troisième
     langue.
-11. **CLI** :
+12. **CLI** :
     ```powershell
-    .\.venv\Scripts\python.exe -m ummahverse_audio probe "D:\Films & Séries\test\a.wav"
-    .\.venv\Scripts\python.exe -m ummahverse_audio extract --input-a "D:\...\a.wav" `
+    .\run.ps1 -Cli probe "D:\Films & Séries\test\a.wav"
+    .\run.ps1 -Cli extract --input-a "D:\...\a.wav" `
         --input-b "D:\...\b.wav" --out-dir "D:\...\sorties"
     ```
-12. **Tests** : `.\.venv\Scripts\python.exe -m pytest -q`. Les tests d'interface
+13. **Tests** : `.\.venv\Scripts\python.exe -m pytest -q`. Les tests d'interface
     utilisent la plateforme « offscreen » et doivent passer sans écran.
+
+14. **Désinstallation** : supprimer le dossier du projet, puis vérifier qu'aucune
+    trace ne subsiste dans `%APPDATA%`, `%LOCALAPPDATA%` ni le menu Démarrer.
 
 Pour chaque point, noter : système, version de Python, de PySide6 et de FFmpeg,
 résultat observé, et capture ou copie du journal. Reporter le résultat dans le tableau

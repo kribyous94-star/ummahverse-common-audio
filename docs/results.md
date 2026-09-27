@@ -209,7 +209,7 @@ long1800 maxrss=411052 kB
 ## Suite de tests
 
 ```
-94 tests, ~28 s   (dont 11 tests d'interface graphique, en mode « offscreen »)
+113 tests, ~28 s   (dont 11 tests d'interface graphique, en mode « offscreen »)
 ```
 
 | Fichier | Ce qu'il quantifie |
@@ -223,6 +223,7 @@ long1800 maxrss=411052 kB
 | `test_memory.py` | la libération de pages ne perd aucune donnée ; piste d'analyse découpée équivalente au calcul direct |
 | `test_cli.py` | contrat CLI exact, scripts shell, concordance README / code |
 | `test_gui.py` | traitement hors thread d'interface, annulation propre, erreurs lisibles, FFmpeg absent, glisser-déposer, choix de flux |
+| `test_install_scripts.py` | confinement des fichiers temporaires dans le dossier, validité et cohérence de `install.*` et `run.*`, redirection du cache pip |
 
 ## Ce que ces chiffres ne disent pas
 

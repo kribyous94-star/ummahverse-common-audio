@@ -28,16 +28,17 @@ l'étape suivante d'UmmahVerse, avec votre outil existant.
 1. [Prérequis](#prérequis)
 2. [Installation sur Ubuntu](#installation-sur-ubuntu)
 3. [Installation sur Windows](#installation-sur-windows)
-4. [Démarrer l'interface graphique](#démarrer-linterface-graphique)
-5. [Parcours complet : deux langues, puis une troisième](#parcours-complet--deux-langues-puis-une-troisième)
-6. [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
-7. [Les fichiers produits](#les-fichiers-produits)
-8. [Quand l'outil refuse ou prévient](#quand-loutil-refuse-ou-prévient)
-9. [Limites de la séparation](#limites-de-la-séparation)
-10. [Performances](#performances)
-11. [Dépannage](#dépannage)
-12. [Tests et mesures](#tests-et-mesures)
-13. [Documentation complémentaire](#documentation-complémentaire)
+4. [Tout reste dans le dossier](#tout-reste-dans-le-dossier)
+5. [Démarrer l'interface graphique](#démarrer-linterface-graphique)
+6. [Parcours complet : deux langues, puis une troisième](#parcours-complet--deux-langues-puis-une-troisième)
+7. [Utilisation en ligne de commande](#utilisation-en-ligne-de-commande)
+8. [Les fichiers produits](#les-fichiers-produits)
+9. [Quand l'outil refuse ou prévient](#quand-loutil-refuse-ou-prévient)
+10. [Limites de la séparation](#limites-de-la-séparation)
+11. [Performances](#performances)
+12. [Dépannage](#dépannage)
+13. [Tests et mesures](#tests-et-mesures)
+14. [Documentation complémentaire](#documentation-complémentaire)
 
 ## Prérequis
 
@@ -45,8 +46,10 @@ l'étape suivante d'UmmahVerse, avec votre outil existant.
 * **FFmpeg et ffprobe** accessibles dans le `PATH` (tout le décodage passe par eux).
 * Aucun GPU, aucun service en ligne. **Les fichiers ne quittent pas l'ordinateur.**
 * Espace disque temporaire : prévoyez environ **1,4 Mio par seconde d'audio stéréo**
-  (≈ 10 Gio pour un film de deux heures), libéré à la fin du traitement. Le dossier
-  temporaire se choisit avec `--workspace-dir`.
+  (≈ 10 Gio pour un film de deux heures), libéré à la fin du traitement. Lancé par
+  `run.sh` / `run.ps1`, ce temporaire va dans `.cache/workspace/`, donc dans le dossier
+  du projet ; `--workspace-dir` ou la variable `UMMAHVERSE_WORKSPACE` permettent de le
+  placer ailleurs (un disque plus grand, par exemple).
 
 ### Installer FFmpeg
 
@@ -81,39 +84,41 @@ $env:UMMAHVERSE_FFPROBE = "C:\ffmpeg\bin\ffprobe.exe"
 
 ```bash
 cd ummahverse-common-audio
-bash scripts/bootstrap.sh
+bash install.sh
 ```
 
-Le script vérifie FFmpeg, crée `.venv/` et installe le projet avec ses extras
-`dev` et `gui`. Pour le faire à la main :
+C'est tout. **Rien n'est installé hors de ce dossier**, aucun `sudo` n'est demandé,
+rien n'est écrit dans votre répertoire personnel — pas même le cache de
+téléchargement de pip. Voir [Tout reste dans le dossier](#tout-reste-dans-le-dossier).
 
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e '.[dev,gui]'
-```
+Options utiles :
+
+| Option | Effet |
+|---|---|
+| `--with-ffmpeg` | télécharge FFmpeg dans `tools/ffmpeg/` au lieu d'utiliser celui du système |
+| `--no-gui` | n'installe pas PySide6 (ligne de commande seule) |
+| `--clean` | repart de zéro : supprime `.venv`, `.venv-gui`, `.cache` et `tools` |
+| `--python CHEMIN` | impose un interpréteur précis |
+| `--offline` | interdit tout accès réseau |
+| `--purge-user-cache` | supprime **en plus** `~/.cache/pip`, hors du dossier |
 
 ## Installation sur Windows
 
 Depuis l'invite de commandes, à la racine du projet :
 
 ```bat
-scripts\bootstrap.bat
+install.bat
 ```
 
 Depuis PowerShell :
 
 ```powershell
-.\scripts\bootstrap.ps1
+.\install.ps1
 ```
 
-Équivalent manuel :
-
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,gui]"
-```
+Mêmes garanties et mêmes options, en notation PowerShell : `-WithFfmpeg`, `-NoGui`,
+`-Clean`, `-Python`, `-Offline`, `-PurgeUserCache`. `install.bat` ne fait que
+transmettre ses arguments à `install.ps1` : il n'y a qu'une implémentation.
 
 > **Non vérifié sur Windows.** Le code n'utilise que `pathlib`, des appels FFmpeg par
 > liste d'arguments (jamais de shell) et des chemins Unicode ; les scripts `.bat` et
@@ -123,29 +128,71 @@ py -3 -m venv .venv
 > [docs/manual-verification.md](docs/manual-verification.md), qui distingue
 > explicitement « réussi » de « non testé ».
 
+## Tout reste dans le dossier
+
+`install.sh` / `install.ps1` ne créent que ceci, sous la racine du projet :
+
+| Chemin | Contenu |
+|---|---|
+| `.venv/` | environnement Python : moteur, CLI, tests, interface |
+| `.venv-gui/` | second environnement, **uniquement** si l'interface ne peut pas être installée dans le premier |
+| `.cache/pip/` | cache de téléchargement pip — `~/.cache/pip` n'est jamais touché |
+| `.cache/workspace/` | fichiers temporaires de traitement, utilisés par `run.sh` / `run.ps1` |
+| `.cache/xdg/` | caches éventuels de Qt et fontconfig pendant l'exécution |
+| `tools/ffmpeg/` | FFmpeg local, seulement avec `--with-ffmpeg` |
+| `.install-state` | trace de ce qui a été installé |
+
+**Pour tout désinstaller : supprimez le dossier.** Rien ne subsiste ailleurs.
+
+Deux prérequis restent nécessairement extérieurs, et ne sont pas installés par ces
+scripts : **Python** lui-même, et **FFmpeg** si vous préférez celui du système à
+`--with-ffmpeg`.
+
+Si plusieurs versions de Python sont présentes, `install.sh` choisit la plus adaptée.
+Dans le cas — rare — où PySide6 n'existerait pas pour cette version, un **second
+environnement** `.venv-gui/` est créé automatiquement avec un autre interpréteur, et
+`run.sh` l'utilise pour l'interface. Si aucun interpréteur ne convient, la CLI reste
+pleinement fonctionnelle et le script le dit clairement.
+
+Les anciens scripts `scripts/bootstrap.*` restent présents (ils font partie du
+contrat d'origine) mais sont plus sommaires : ils laissent le cache pip dans votre
+répertoire personnel. **Préférez `install.sh` / `install.ps1`.**
+
 ## Démarrer l'interface graphique
 
 ```bash
-bash scripts/launch.sh          # Ubuntu
+bash run.sh                     # Ubuntu
 ```
 
 ```bat
-scripts\launch.bat              REM Windows (invite de commandes)
+run.bat                         REM Windows (invite de commandes, ou double-clic)
 ```
 
 ```powershell
-.\scripts\launch.ps1            # Windows (PowerShell)
-```
-
-Sans les scripts :
-
-```bash
-.venv/bin/python -m ummahverse_audio gui        # Ubuntu
-.\.venv\Scripts\python.exe -m ummahverse_audio gui   # Windows
+.\run.ps1                       # Windows (PowerShell)
 ```
 
 La fenêtre s'ouvre avec deux onglets. Si FFmpeg manque, un message l'indique avec la
 commande d'installation à lancer, et l'application se referme.
+
+`run.sh` / `run.ps1` choisissent l'environnement installé, utilisent le FFmpeg local
+s'il y en a un dans `tools/ffmpeg/`, et placent les fichiers temporaires de traitement
+dans `.cache/workspace/`. Ils servent aussi de raccourci vers la CLI :
+
+```bash
+bash run.sh -- extract --input-a A.wav --input-b B.wav --out-dir sorties   # Ubuntu
+```
+
+```powershell
+.\run.ps1 -Cli extract --input-a A.wav --input-b B.wav --out-dir sorties   # Windows
+```
+
+Sans les scripts, l'interface se lance aussi directement :
+
+```bash
+.venv/bin/python -m ummahverse_audio gui             # Ubuntu
+.\.venv\Scripts\python.exe -m ummahverse_audio gui   # Windows
+```
 
 ## Parcours complet : deux langues, puis une troisième
 
@@ -379,7 +426,10 @@ Mesuré sur Ubuntu 24.04, Python 3.12, 16 cœurs, entrées WAV stéréo 48 kHz
 | `Nombres de canaux différents` | préparez vous-même deux pistes de même agencement ; l'outil ne fera pas le downmix à votre place |
 | `Agencement de canaux inconnu` | déclarez l'agencement avec FFmpeg, ou `--allow-unknown-layout` si l'ordre est sûr |
 | `Aucun décalage global n'a pu être estimé` | pistes issues de montages différents, ou décalage > `--max-offset` : augmentez `--max-offset` |
-| `Application non installée` au lancement | lancez `bash scripts/bootstrap.sh` (ou `scripts\bootstrap.bat`) |
+| `Application non installée` au lancement | lancez `bash install.sh` (ou `install.bat`) |
+| `Aucun interpréteur Python 3.10+` | installez Python 3.10 ou plus récent, ou indiquez-le : `bash install.sh --python /chemin/python3.12` |
+| `Aucun environnement graphique détecté` | `run.sh` a besoin de `DISPLAY` ou `WAYLAND_DISPLAY` ; en SSH, utilisez `bash run.sh -- extract …` |
+| L'installation a rempli `~/.cache/pip` | vous avez utilisé `scripts/bootstrap.sh` ; `install.sh` met ce cache dans `.cache/pip` |
 | `PySide6 est requis pour l'interface graphique` | l'extra `gui` n'est pas installé : `pip install -e '.[gui]'` |
 | Fenêtre vide ou erreur Qt sur un serveur sans écran | l'interface a besoin d'un environnement graphique ; en SSH utilisez la CLI |
 | Beaucoup de « zones non comparables » | montages différents, ou une version contient des plans absents de l'autre |
@@ -390,7 +440,7 @@ Mesuré sur Ubuntu 24.04, Python 3.12, 16 cœurs, entrées WAV stéréo 48 kHz
 ## Tests et mesures
 
 ```bash
-# Suite complète (94 tests, ~28 s)
+# Suite complète (113 tests, ~28 s)
 .venv/bin/python -m pytest -q
 
 # Un domaine à la fois
@@ -410,6 +460,12 @@ Sous Windows :
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe scripts\benchmark.py --out-dir benchmarks
+```
+
+Pour repartir d'une installation neuve et vérifier qu'elle est bien autonome :
+
+```bash
+bash install.sh --clean && bash run.sh -- --version
 ```
 
 Les jeux de test sont **synthétiques et générés à la demande** : aucun média n'est
