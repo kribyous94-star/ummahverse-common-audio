@@ -76,11 +76,16 @@ def test_window_has_two_operations_in_french(window):
 
 
 def test_stream_selector_is_locked_for_single_stream(window, scene):
+    selector = window.extract_tab.stream_a
     window.extract_tab.field_a.set_path(scene.a)
-    assert window.extract_tab.stream_a.selected_index == 0
+    assert selector.selected_index == 0
     # Un seul flux : la liste est verrouillée, pas de choix ambigu à faire.
-    assert not window.extract_tab.stream_a.combo.isEnabled()
-    assert "Un seul flux" in window.extract_tab.stream_a.status.text()
+    assert not selector.combo.isEnabled()
+    assert selector.combo.count() == 1
+    assert "48000 Hz" in selector.combo.currentText()
+    # Le flux est décrit par la liste elle-même : pas de ligne d'état redondante.
+    assert selector.status.text() == ""
+    assert "Un seul flux" in window.extract_tab.log.toPlainText()
 
 
 def test_stream_selector_requires_a_choice_for_multiple_streams(window, tmp_path, scene):

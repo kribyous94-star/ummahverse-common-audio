@@ -129,9 +129,11 @@ class StreamSelector(QWidget):
         if len(self._streams) > 1:
             message = (f"{len(self._streams)} flux audio : choisissez explicitement "
                        "lequel utiliser.")
+            self.status.setText(message)
         else:
+            # Un seul flux : la liste le montre déjà, inutile de répéter la ligne.
             message = f"Un seul flux audio : {self._streams[0].label()}"
-        self.status.setText(message)
+            self.status.setText("")
         return message
 
     @property
@@ -153,6 +155,7 @@ class LogView(QPlainTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setMaximumBlockCount(4000)
+        self.setMinimumHeight(190)   # le journal est la sortie principale : lisible d'emblée
         self.setPlaceholderText("Les étapes, avertissements et mesures apparaissent ici.")
 
     def append(self, message: str) -> None:
