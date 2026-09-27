@@ -163,11 +163,13 @@ class SeparationSummary:
     diagnostics: BlockDiagnostics = field(default_factory=BlockDiagnostics)
     blocks_processed: int = 0
     blocks_skipped: int = 0
+    blocks_uncertain: int = 0
 
     def as_dict(self) -> dict:
         payload = self.diagnostics.as_dict()
         payload.update({
             "blocks_processed": self.blocks_processed,
-            "blocks_skipped_not_comparable": self.blocks_skipped,
+            "blocks_skipped_no_alignment": self.blocks_skipped,
+            "blocks_processed_with_interpolated_delay": self.blocks_uncertain,
         })
         return payload

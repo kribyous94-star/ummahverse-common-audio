@@ -258,9 +258,17 @@ def _process_blocks(audio_a, audio_b, offset_map, config: StftConfig, plan: Bloc
             delay = float(offset_map.delays[index])
             integer, fractional = split_delay(delay)
             weights = plan.weights(start, audio_a.frames)
-            comparable = bool(offset_map.comparable[index])
+            # Un bloc dont le décalage local est peu sûr est tout de même traité, avec
+            # le décalage interpolé de ses voisins : là où rien n'est partagé, la
+            # puissance commune tombe d'elle-même à zéro, alors que sauter le bloc
+            # créait un trou audible — le commun jouait, s'arrêtait, reprenait.
+            usable = bool(offset_map.comparable.any())
+            if not bool(offset_map.comparable[index]):
+                summary.blocks_uncertain += 1
 
-            if not comparable:
+            if not usable:
+                # Aucun décalage exploitable nulle part : politique explicite, commun
+                # nul et résidu identique à l'entrée. On n'invente pas de bande commune.
                 zeros = np.zeros((plan.block_frames, audio_a.channels), dtype=np.float64)
                 sink_a.add(start, zeros, weights)
                 sink_b.add(start + integer, zeros, weights)

@@ -138,7 +138,10 @@ def test_offset_map_reports_clock_drift(tmp_path):
                                global_delay.confidence, global_delay.peak_ratio)
         offset_map = build_offset_map(audio_a, audio_b, plan.advance, scaled,
                                       tracks=(track_a, track_b, rate))
-    assert offset_map.drift_ppm < -50, offset_map.drift_ppm
+    # B lit la musique plus lentement : son retard **croît** avec le temps, la dérive
+    # est donc positive. Un signe inversé ici passait inaperçu jusqu'à ce que
+    # l'affinage local soit corrigé.
+    assert 120 < offset_map.drift_ppm < 300, offset_map.drift_ppm
     assert any("érive" in note for note in offset_map.notes)
 
 

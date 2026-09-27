@@ -32,6 +32,10 @@ _REFINE_UPSAMPLE = 32
 MIN_PEAK_RATIO = 10.0
 #: Corrélation normalisée minimale pour juger un décalage crédible.
 MIN_CONFIDENCE = 0.05
+#: Plancher de corrélation locale sous lequel un bloc est tenu pour sans contenu commun.
+#: Deux versions simplement égalisées ou de polarité inversée descendent vers 0,05 sans
+#: cesser d'être exploitables ; un plan réellement différent tombe sous 0,01.
+MIN_LOCAL_CORRELATION = 0.02
 #: Au-delà, la corrélation de forme d'onde est franche : elle prime sur l'enveloppe.
 DECISIVE_CONFIDENCE = 0.30
 DECISIVE_PEAK_RATIO = 60.0
@@ -363,6 +367,9 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
     ce sont typiquement des coupes, des plans absents d'une version, ou des passages
     dont les mixages n'ont plus de contenu commun.
     """
+    from .audio_io import analysis_weights
+
+    weights = analysis_weights(audio_a.stream.effective_layout, audio_a.channels)
     if tracks is not None:
         track_a, track_b, analysis_rate = tracks
     else:
@@ -395,13 +402,29 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
         coarse_delay = (coarse.integer_delay + (max(lo, 0) - coarse_start)) * ratio
 
         # Raffinement pleine résolution autour du décalage grossier.
-        block_a = audio_a.read(int(start), block_frames).mean(axis=1)
+        # Même pondération que la piste d'analyse : moyenner les six canaux ferait
+        # dominer le centre — le dialogue, donc ce qui diffère — et les surrounds, qui
+        # peuvent porter leur propre retard. L'affinage échouerait alors sur des blocs
+        # dont le contenu est pourtant parfaitement commun.
+        block_a = audio_a.read(int(start), block_frames) @ weights
         center = int(round(coarse_delay))
         pad = fine_search + 64
-        block_b = audio_b.read(int(start) + center - pad, block_frames + 2 * pad).mean(axis=1)
-        fine = gcc_phat(block_a, block_b, max_shift=pad, refine=True)
-        delays[position] = fine.delay + center - pad
-        confidences[position] = max(fine.confidence, coarse.confidence * 0.5)
+        block_b = audio_b.read(int(start) + center - pad,
+                               block_frames + 2 * pad) @ weights
+        # `block_b` commence `pad` trames avant le décalage grossier : le décalage
+        # attendu vaut donc `pad`, et c'est là qu'il faut centrer la recherche. Centrée
+        # sur zéro, elle plaçait la bonne réponse au bord même de la fenêtre et
+        # gaspillait la moitié de son étendue.
+        fine = gcc_phat(block_a, block_b, max_shift=fine_search, center=pad, refine=True)
+        measured = fine.delay - pad
+        # Un pic collé au bord de la fenêtre n'est pas une mesure : c'est un échec de
+        # recherche. Mieux vaut garder l'estimation grossière que cette valeur fausse.
+        if abs(measured) >= 0.9 * fine_search:
+            delays[position] = coarse_delay
+            confidences[position] = coarse.confidence * 0.5
+        else:
+            delays[position] = measured + center
+            confidences[position] = max(fine.confidence, coarse.confidence * 0.5)
         # Cette passe parcourt tout le signal : on rend les pages déjà lues, sinon le
         # cache de fichiers du processus finit par contenir les deux films entiers.
         audio_a.release_until(int(start) - 2 * block_frames)
@@ -418,20 +441,37 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
     confident = confidences >= confidence_threshold
     anchor = float(np.median(delays[confident])) if confident.any() else base
     # Un décalage qui tombe sur la même valeur que ses voisins est une preuve
-    # d'alignement en soi, même quand la corrélation brute reste modeste.
-    consistent = np.abs(delays - anchor) <= max(fine_search, audio_a.sample_rate * 0.02)
-    comparable = confident | consistent
+    # d'alignement en soi, même quand la corrélation brute reste modeste — c'est le cas
+    # dès que les deux versions diffèrent par une égalisation ou une inversion de
+    # polarité, qui effondrent la corrélation sans rien changer au contenu.
+    # La tolérance doit rester très inférieure à la fenêtre de recherche : à l'échelle
+    # de celle-ci, n'importe quel pic fortuit paraîtrait « cohérent ».
+    consistent = np.abs(delays - anchor) <= max(audio_a.sample_rate * 0.01, 480)
+    # ...mais une corrélation strictement nulle reste une absence de contenu commun :
+    # sans ce plancher, un pic fortuit tombant près du décalage global suffirait à
+    # faire passer pour comparable un plan totalement différent.
+    comparable = confident | (consistent & (confidences >= MIN_LOCAL_CORRELATION))
 
-    # Décalages incohérents => on retombe sur la référence globale et on marque le bloc.
+    # Décalages aberrants : le bloc n'est pas mesuré de façon fiable.
     reference = float(np.median(delays[comparable])) if comparable.any() else anchor
     outliers = np.abs(delays - reference) > max(fine_search * 4, audio_a.sample_rate * 0.5)
     if outliers.any():
         notes.append(
-            f"{int(outliers.sum())} bloc(s) présentent un décalage local aberrant et sont "
-            "traités comme non comparables."
+            f"{int(outliers.sum())} bloc(s) présentent un décalage local aberrant : "
+            "le décalage de leurs voisins leur est appliqué."
         )
         comparable &= ~outliers
-        delays[outliers] = reference
+
+    # Là où le décalage n'a pas pu être mesuré, on interpole celui des voisins fiables
+    # plutôt que d'abandonner le bloc. Un décalage interpolé reste bien meilleur qu'un
+    # commun mis à zéro : si le contenu est réellement partagé, l'estimateur le
+    # retrouve ; s'il ne l'est pas, la puissance commune tombe d'elle-même. Laisser des
+    # trous produisait un commun haché — musique, silence, musique — alors que le
+    # contenu était là.
+    if comparable.any() and not comparable.all():
+        delays[~comparable] = np.interp(starts[~comparable].astype(np.float64),
+                                        starts[comparable].astype(np.float64),
+                                        delays[comparable])
 
     drift_ppm = _estimate_drift_ppm(starts, delays, comparable)
     if abs(drift_ppm) > 5.0:
@@ -441,8 +481,11 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
         )
     if comparable.size and comparable.mean() < 0.5:
         notes.append(
-            f"Seulement {comparable.mean() * 100:.0f} % des blocs ont un décalage local "
-            "fiable : montages probablement différents, ou coupes entre les versions."
+            f"{100 - comparable.mean() * 100:.0f} % des blocs ont une corrélation locale "
+            "trop faible pour confirmer leur décalage ; ils sont traités avec celui de "
+            "leurs voisins. C'est normal si les deux versions diffèrent par une "
+            "égalisation ou une inversion de polarité, et suspect si elles devraient "
+            "être identiques."
         )
 
     return OffsetMap(
