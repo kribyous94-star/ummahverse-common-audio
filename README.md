@@ -358,12 +358,17 @@ en fond. [docs/limitations.md](docs/limitations.md) détaille chaque cas, et
 Mesuré sur Ubuntu 24.04, Python 3.12, 16 cœurs, entrées WAV stéréo 48 kHz
 (`scripts/benchmark.py`, chiffres complets dans [docs/results.md](docs/results.md)) :
 
-* environ **15 à 18 × le temps réel** pour `extract` : une heure d'audio en 3 à 4
-  minutes ;
-* mémoire résidente **dominée par les pages de fichiers cartographiés**, donc
-  réclamables par le système ; le calcul par bloc lui-même reste borné quelle que soit
-  la durée du film ;
-* disque temporaire : ≈ 1,4 Mio par seconde d'audio stéréo.
+| Durée audio | `extract` | Facteur temps réel | Pic de mémoire |
+|---|---|---|---|
+| 1 min | 3,7 s | 16 × | 407 Mio |
+| 5 min | 13,0 s | 23 × | 407 Mio |
+| 15 min | 31,3 s | 29 × | 407 Mio |
+| 30 min | 61,5 s | 29 × | 407 Mio |
+
+* Un film de deux heures : **environ 4 minutes** de traitement.
+* La mémoire est **constante quelle que soit la durée** : le traitement se fait par
+  blocs et les pages déjà consommées sont rendues au système.
+* Disque temporaire : ≈ 1,4 Mio par seconde d'audio stéréo, libéré à la fin.
 
 ## Dépannage
 
@@ -385,7 +390,7 @@ Mesuré sur Ubuntu 24.04, Python 3.12, 16 cœurs, entrées WAV stéréo 48 kHz
 ## Tests et mesures
 
 ```bash
-# Suite complète (89 tests, ~35 s)
+# Suite complète (94 tests, ~28 s)
 .venv/bin/python -m pytest -q
 
 # Un domaine à la fois

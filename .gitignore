@@ -31,3 +31,6 @@ benchmarks/
 # Système
 .DS_Store
 Thumbs.db
+
+# Fichiers de session de l'outillage local
+.claude/
