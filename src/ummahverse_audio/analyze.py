@@ -19,6 +19,7 @@ from .metadata import base_payload, limitations_notice, stream_descriptor
 from .perf import Stopwatch
 from .progress import Progress, SubProgress
 from .transfer import estimate_transfer
+from .verdict import CommonBedVerdict, judge
 
 
 @dataclass
@@ -27,6 +28,7 @@ class AnalysisReport:
 
     payload: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    verdict: CommonBedVerdict | None = None
 
     def summary_lines(self) -> list[str]:
         alignment = self.payload["alignment"]
@@ -49,6 +51,10 @@ class AnalysisReport:
             + ", ".join(f"{g:.4f}" for g in transfer["broadband_gain_per_channel"]),
             f"Cases temps-fréquence fiables : "
             f"{transfer['reliable_cell_fraction'] * 100:.2f} %",
+            f"Cohérence pondérée par l'énergie : "
+            f"{transfer['energy_weighted_coherence'] * 100:.2f} % "
+            f"(corrigée du biais : "
+            f"{transfer['energy_weighted_coherence_debiased'] * 100:.2f} %)",
         ]
 
 
@@ -84,7 +90,8 @@ def run_analysis(options: ExtractOptions, progress: Progress | None = None) -> A
         scaled = DelayEstimate(
             delay=global_delay.delay * rate / analysis_rate,
             integer_delay=int(round(global_delay.integer_delay * rate / analysis_rate)),
-            confidence=global_delay.confidence, peak_ratio=global_delay.peak_ratio)
+            confidence=global_delay.confidence, peak_ratio=global_delay.peak_ratio,
+            method=global_delay.method)
         if scaled.confidence < 0.05:
             warnings.append(
                 f"Corrélation globale très faible ({scaled.confidence:.3f}) : les deux "
@@ -107,6 +114,13 @@ def run_analysis(options: ExtractOptions, progress: Progress | None = None) -> A
             progress=SubProgress(progress, 0.8, 1.0))
         warnings += transfer.warnings
 
+        verdict = judge(
+            mean_coherence=transfer.mean_coherence_debiased,
+            reliable_fraction=transfer.reliable_fraction,
+            comparable_fraction=offset_map.comparable_ratio,
+            alignment_method=scaled.method,
+            alignment_confidence=scaled.confidence)
+
         payload = base_payload("analyze", describe_environment())
         payload.update({
             "inputs": {"a": stream_descriptor(audio_a), "b": stream_descriptor(audio_b)},
@@ -116,6 +130,7 @@ def run_analysis(options: ExtractOptions, progress: Progress | None = None) -> A
                 "global_delay_samples": round(float(scaled.delay), 4),
                 "global_delay_s": round(float(scaled.delay) / rate, 6),
                 "global_confidence": round(float(scaled.confidence), 4),
+                "method": scaled.method,
                 "drift_ppm": round(offset_map.drift_ppm, 3),
                 "comparable_block_fraction": round(offset_map.comparable_ratio, 4),
                 "non_comparable_segments": offset_map.segments(rate, comparable=False),
@@ -124,8 +139,9 @@ def run_analysis(options: ExtractOptions, progress: Progress | None = None) -> A
             "stft": config.as_dict(),
             "blocks": plan.as_dict(rate),
             "performance": watch.as_dict(),
+            "common_bed_verdict": verdict.as_dict(),
             "warnings": warnings,
             "limitations": limitations_notice(),
         })
     progress.step(1.0, "analyse terminée")
-    return AnalysisReport(payload=payload, warnings=warnings)
+    return AnalysisReport(payload=payload, warnings=warnings, verdict=verdict)

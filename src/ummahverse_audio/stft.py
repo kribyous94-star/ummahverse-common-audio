@@ -111,6 +111,21 @@ def magnitude_squared_coherence(saa: np.ndarray, sbb: np.ndarray,
     return np.clip(gamma, 0.0, 1.0)
 
 
+def debias_coherence(measured: float, independent_cells: float) -> float:
+    """Retire le biais de la cohérence quadratique estimée sur un nombre fini de moyennes.
+
+    Deux signaux **sans aucun rapport** ne donnent pas une cohérence nulle : moyennée
+    sur `N` cases indépendantes, son espérance vaut environ `1/N`. Avec le lissage par
+    défaut, `N ≈ 10`, donc un plancher de 0,1 — assez pour faire passer deux mixages
+    totalement différents pour « 10 % communs » si l'on ne corrige rien.
+
+    Correction usuelle : `γ² ← (γ̂² − 1/N) / (1 − 1/N)`, ramenée à zéro si négative.
+    """
+    n = max(float(independent_cells), 1.0001)
+    floor = 1.0 / n
+    return float(max((float(measured) - floor) / (1.0 - floor), 0.0))
+
+
 def fractional_delay_ramp(n_bins: int, n_fft: int, delay: float) -> np.ndarray:
     """Rampe de phase appliquant un retard fractionnaire de `delay` trames.
 

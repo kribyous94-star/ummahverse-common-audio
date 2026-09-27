@@ -11,7 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .align import DelayEstimate, build_offset_map, estimate_global_delay
+from .align import (DelayEstimate, build_offset_map, estimate_channel_offsets,
+                    estimate_global_delay)
 from .audio_io import Workspace, check_layout_compatibility, choose_common_rate, load_input
 from .blocks import BlockPlan, align_spectrum, delay_spectrum, read_extended, split_delay
 from .errors import UmmahAudioError
@@ -26,6 +27,7 @@ from .separate import (BlockDiagnostics, SeparationParams, SeparationSummary,
 from .sinks import AccumulatorSink, StreamingCommonSink
 from .stft import StftConfig
 from .transfer import estimate_transfer
+from .verdict import judge
 
 #: Noms de fichiers produits, fixés par le contrat CLI.
 COMMON_NAME = "common.wav"
@@ -84,6 +86,7 @@ class ExtractResult:
     metadata_path: Path
     metadata: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    verdict: object = None
 
     @property
     def outputs(self) -> list[Path]:
@@ -141,6 +144,7 @@ def run_extract(options: ExtractOptions, progress: Progress | None = None) -> Ex
             delay=global_delay.delay * rate / analysis_rate,
             integer_delay=int(round(global_delay.integer_delay * rate / analysis_rate)),
             confidence=global_delay.confidence, peak_ratio=global_delay.peak_ratio,
+            method=global_delay.method,
         )
         progress.log(f"Décalage global : {scaled.delay / rate * 1000:.2f} ms "
                      f"(confiance {scaled.confidence:.3f})")
@@ -165,12 +169,29 @@ def run_extract(options: ExtractOptions, progress: Progress | None = None) -> Ex
         audio_b.release_all()
         watch.mark("align")
 
+        progress.stage("Décalage propre à chaque canal")
+        channel_offsets, channel_confidence = estimate_channel_offsets(
+            audio_a, audio_b, offset_map, plan,
+            progress=SubProgress(progress, 0.34, 0.38))
+        audio_a.release_all()
+        audio_b.release_all()
+        if np.any(np.abs(channel_offsets) > 1):
+            detail = ", ".join(
+                f"canal {i} : {o / rate * 1000:+.1f} ms"
+                for i, o in enumerate(channel_offsets) if abs(o) > 1)
+            progress.log("Décalages par canal : " + detail)
+            if np.max(np.abs(channel_offsets)) > 0.002 * rate:
+                warnings.append(
+                    "Les canaux ne sont pas synchrones entre les deux versions ("
+                    + detail + ") : chacun est recalé séparément.")
+        watch.mark("channels")
+
         progress.stage("Estimation du gain et de l'égalisation entre versions")
         transfer = estimate_transfer(
             audio_a, audio_b, offset_map, config, plan, mode=options.transfer_mode,
             coherence_threshold=options.coherence_threshold,
-            estimator=options.transfer_estimator,
-            progress=SubProgress(progress, 0.34, 0.42),
+            estimator=options.transfer_estimator, channel_offsets=channel_offsets,
+            progress=SubProgress(progress, 0.38, 0.42),
         )
         warnings += transfer.warnings
         progress.log("Gain large bande par canal : "
@@ -183,25 +204,36 @@ def run_extract(options: ExtractOptions, progress: Progress | None = None) -> Ex
         progress.stage("Estimation du commun bloc par bloc")
         summary, timeline, measurements = _process_blocks(
             audio_a, audio_b, offset_map, config, plan, params, transfer, workspace,
-            out_dir, options, SubProgress(progress, 0.42, 0.98), warnings)
+            out_dir, options, channel_offsets, SubProgress(progress, 0.42, 0.98),
+            warnings)
         watch.mark("separate")
         progress.step(1.0, "terminé")
+
+        verdict = judge(
+            mean_coherence=summary.diagnostics.debiased_coherence(config),
+            reliable_fraction=transfer.reliable_fraction,
+            comparable_fraction=offset_map.comparable_ratio,
+            alignment_method=scaled.method,
+            alignment_confidence=scaled.confidence)
+        if not verdict.usable:
+            warnings.insert(0, verdict.headline + " " + verdict.detail)
 
         metadata = _build_metadata(options, audio_a, audio_b, config, plan, params,
                                    offset_map, transfer, summary, timeline, measurements,
                                    warnings, watch, scaled)
+        metadata["common_bed_verdict"] = verdict.as_dict()
         metadata_path = write_json(out_dir / METADATA_NAME, metadata)
 
     return ExtractResult(
         common_path=out_dir / COMMON_NAME, a_only_path=out_dir / A_ONLY_NAME,
         b_only_path=out_dir / B_ONLY_NAME, metadata_path=metadata_path,
-        metadata=metadata, warnings=warnings,
+        metadata=metadata, warnings=warnings, verdict=verdict,
     )
 
 
 def _process_blocks(audio_a, audio_b, offset_map, config: StftConfig, plan: BlockPlan,
                     params: SeparationParams, transfer, workspace, out_dir: Path,
-                    options: ExtractOptions, progress: Progress,
+                    options: ExtractOptions, channel_offsets, progress: Progress,
                     warnings: list[str]) -> tuple[SeparationSummary, list[dict], dict]:
     """Boucle principale : estime le commun, l'écrit et en déduit les deux résidus."""
     sft = config.build()
@@ -209,6 +241,9 @@ def _process_blocks(audio_a, audio_b, offset_map, config: StftConfig, plan: Bloc
     timeline: list[dict] = []
     starts = offset_map.starts
     extended = plan.block_frames + 2 * plan.margin
+    channel_offsets = np.asarray(channel_offsets, dtype=np.float64)
+    channel_shift = np.rint(channel_offsets).astype(int)
+    channel_span = int(max(np.abs(channel_shift).max(initial=0), 1)) + 1
 
     sink_a = StreamingCommonSink(audio_a, out_dir / COMMON_NAME, out_dir / A_ONLY_NAME,
                                 options.wav_format)
@@ -235,26 +270,41 @@ def _process_blocks(audio_a, audio_b, offset_map, config: StftConfig, plan: Bloc
                 continue
 
             block_a = read_extended(audio_a, start, plan)
-            block_b = read_extended(audio_b, start + integer, plan)
+            # B est lu large : chaque canal y est ensuite découpé à son propre
+            # décalage, sans quoi les surrounds d'un 5.1 remixé ne s'annulent pas.
+            wide_b = audio_b.read(start - plan.margin + integer - channel_span,
+                                  extended + 2 * channel_span)
             common_a = np.zeros((extended, audio_a.channels), dtype=np.float64)
             common_b = np.zeros((extended, audio_a.channels), dtype=np.float64)
             block_diagnostics = BlockDiagnostics()
             for channel in range(audio_a.channels):
+                shift = int(channel_shift[channel])
+                extra = float(channel_offsets[channel] - shift)
+                lo = channel_span + shift
                 spec_a = sft.stft(block_a[:, channel].astype(np.float64))
-                spec_b = align_spectrum(sft.stft(block_b[:, channel].astype(np.float64)),
-                                        fractional, config)
+                spec_b = align_spectrum(
+                    sft.stft(wide_b[lo:lo + extended, channel].astype(np.float64)),
+                    fractional + extra, config)
                 spec_c, diagnostics = estimate_common_spectrum(
                     spec_a, spec_b, transfer.response[channel], config, params)
                 common_a[:, channel] = sft.istft(spec_c, k0=0, k1=extended)
                 spec_c_b = delay_spectrum(spec_c * transfer.response[channel][:, None],
-                                          fractional, config)
+                                          fractional + extra, config)
                 common_b[:, channel] = sft.istft(spec_c_b, k0=0, k1=extended)
                 summary.diagnostics.merge(diagnostics)
                 block_diagnostics.merge(diagnostics)
 
             useful = slice(plan.margin, plan.margin + plan.block_frames)
             sink_a.add(start, common_a[useful], weights)
-            sink_b.add(start + integer, common_b[useful], weights)
+            # Le commun rendu dans le repère de B : chaque canal est décalé de son
+            # propre retard, tous écrits à la même position pour garder un seul
+            # accumulateur de poids.
+            rendered = np.empty((plan.block_frames, audio_b.channels), dtype=np.float64)
+            for channel in range(audio_b.channels):
+                shift = int(channel_shift[channel])
+                lo = plan.margin - shift
+                rendered[:, channel] = common_b[lo:lo + plan.block_frames, channel]
+            sink_b.add(start + integer, rendered, weights)
             # Les entrées ne sont plus relues en arrière : on rend les pages au système
             # pour que le pic mémoire ne suive pas la durée du film.
             audio_a.release_until(start - 2 * plan.block_frames)
@@ -362,6 +412,7 @@ def _build_metadata(options: ExtractOptions, audio_a, audio_b, config: StftConfi
             "global_delay_samples": round(float(global_delay.delay), 4),
             "global_delay_s": round(float(global_delay.delay) / sample_rate, 6),
             "global_confidence": round(float(global_delay.confidence), 4),
+            "method": global_delay.method,
             "confidence_definition": "corrélation normalisée sur la piste d'analyse décimée",
             "local_block_s": round(plan.advance / sample_rate, 4),
             "local_search_s": options.local_search_s,

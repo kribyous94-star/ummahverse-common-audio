@@ -164,7 +164,20 @@ def _run_extract(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_verdict(verdict) -> None:
+    if verdict is None:
+        return
+    marker = {"absente": "[ÉCHEC]", "faible": "[FAIBLE]",
+              "partielle": "[PARTIEL]", "bonne": "[OK]"}.get(verdict.level, "")
+    print(f"\n{marker} {verdict.headline}")
+    for line in (verdict.detail, verdict.advice):
+        if line:
+            print(f"  {line}")
+    print()
+
+
 def _report_extract(result) -> None:
+    _print_verdict(result.verdict)
     measurements = result.metadata["outputs"]["measurements"]
     alignment = result.metadata["alignment"]
     diagnostics = result.metadata["separation"]["diagnostics"]
@@ -242,6 +255,7 @@ def _run_analyze(args: argparse.Namespace) -> int:
         return 0
     for line in report.summary_lines():
         print(line)
+    _print_verdict(report.verdict)
     if report.warnings:
         print("Avertissements :")
         for warning in report.warnings:

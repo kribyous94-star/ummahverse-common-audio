@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .blocks import BlockPlan, align_spectrum, read_extended, split_delay
-from .stft import (StftConfig, local_spectra, magnitude_squared_coherence, smooth_cross)
+from .stft import (StftConfig, debias_coherence, local_spectra,
+                   magnitude_squared_coherence, smooth_cross)
 
 #: Bandes d'octave utilisées pour résumer `H` dans les métadonnées.
 OCTAVE_EDGES = (0.0, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0)
@@ -41,6 +42,13 @@ class Transfer:
     reliable_cells: int
     coherence_threshold: float
     estimator: str = "power"
+    mean_coherence: float = 0.0
+    mean_coherence_debiased: float = 0.0
+    """Cohérence locale moyenne, pondérée par l'énergie de A, sur les blocs sondés.
+
+    C'est la mesure qui dit s'il existe une bande commune : proche de 0, les deux
+    versions ne partagent rien, même parfaitement alignées.
+    """
     broadband_gain: list[float] = field(default_factory=list)
     band_gain_db: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -58,6 +66,8 @@ class Transfer:
                                else "|H| = |ΣS_AB| / ΣS_AA"),
             "coherence_threshold": self.coherence_threshold,
             "reliable_cell_fraction": round(self.reliable_fraction, 4),
+            "energy_weighted_coherence": round(self.mean_coherence, 4),
+            "energy_weighted_coherence_debiased": round(self.mean_coherence_debiased, 4),
             "reliable_cells": int(self.reliable_cells),
             "broadband_gain_per_channel": [round(g, 5) for g in self.broadband_gain],
             "band_gain_db_per_channel": self.band_gain_db,
@@ -95,7 +105,8 @@ def _select_probe_blocks(offset_map, limit: int) -> list[int]:
 def estimate_transfer(audio_a, audio_b, offset_map, config: StftConfig, plan: BlockPlan,
                       mode: str = "band", coherence_threshold: float = 0.8,
                       probe_blocks: int = 32, min_cells_per_bin: int = 8,
-                      estimator: str = "power", progress=None) -> Transfer:
+                      estimator: str = "power", channel_offsets=None,
+                      progress=None) -> Transfer:
     """Estime `H(f)` par canal sur des blocs répartis dans tout le signal.
 
     Deux estimateurs d'amplitude, tous deux calculés sur les cases fiables :
@@ -118,17 +129,25 @@ def estimate_transfer(audio_a, audio_b, offset_map, config: StftConfig, plan: Bl
         return Transfer(mode="none", response=np.ones((channels, bins), dtype=np.complex128),
                         reliable_fraction=float("nan"), reliable_cells=0,
                         coherence_threshold=coherence_threshold, estimator=estimator,
-                        broadband_gain=[1.0] * channels,
+                        mean_coherence=0.0, broadband_gain=[1.0] * channels,
                         band_gain_db=[{} for _ in range(channels)],
                         warnings=["Transformation désactivée (--transfer none) : H = 1."])
 
     sft = config.build()
+    # Chaque canal peut avoir son propre retard : l'ignorer ici reviendrait à estimer
+    # H(f) sur des canaux désalignés, donc à en faire du bruit.
+    offsets = (np.zeros(channels) if channel_offsets is None
+               else np.asarray(channel_offsets, dtype=np.float64))
+    shifts = np.rint(offsets).astype(int)
+    span = int(np.abs(shifts).max(initial=0)) + 1
     numerator = np.zeros((channels, bins), dtype=np.complex128)
     denominator = np.zeros((channels, bins), dtype=np.float64)
     target_power = np.zeros((channels, bins), dtype=np.float64)
     counts = np.zeros((channels, bins), dtype=np.int64)
     total_cells = 0
     reliable_cells = 0
+    coherence_weighted = 0.0
+    coherence_weight = 0.0
 
     picks = _select_probe_blocks(offset_map, probe_blocks)
     for position, index in enumerate(picks):
@@ -137,16 +156,22 @@ def estimate_transfer(audio_a, audio_b, offset_map, config: StftConfig, plan: Bl
         start = int(offset_map.starts[index])
         integer, fractional = split_delay(float(offset_map.delays[index]))
         block_a = read_extended(audio_a, start, plan)
-        block_b = read_extended(audio_b, start + integer, plan)
+        extended = plan.block_frames + 2 * plan.margin
+        wide_b = audio_b.read(start - plan.margin + integer - span, extended + 2 * span)
         for channel in range(channels):
+            lo = span + int(shifts[channel])
+            extra = float(offsets[channel] - shifts[channel])
             spec_a = sft.stft(block_a[:, channel].astype(np.float64))
-            spec_b = align_spectrum(sft.stft(block_b[:, channel].astype(np.float64)),
-                                    fractional, config)
+            spec_b = align_spectrum(
+                sft.stft(wide_b[lo:lo + extended, channel].astype(np.float64)),
+                fractional + extra, config)
             saa, sbb, sab = local_spectra(spec_a, spec_b, config)
             gamma = magnitude_squared_coherence(saa, sbb, sab)
             reliable = gamma >= coherence_threshold
             total_cells += gamma.size
             reliable_cells += int(reliable.sum())
+            coherence_weighted += float(np.sum(gamma * saa))
+            coherence_weight += float(np.sum(saa))
             if not reliable.any():
                 continue
             numerator[channel] += np.sum(np.where(reliable, np.conj(sab), 0.0), axis=1)
@@ -156,6 +181,8 @@ def estimate_transfer(audio_a, audio_b, offset_map, config: StftConfig, plan: Bl
 
     warnings: list[str] = []
     reliable_fraction = reliable_cells / total_cells if total_cells else 0.0
+    mean_coherence = coherence_weighted / coherence_weight if coherence_weight else 0.0
+    mean_coherence_debiased = debias_coherence(mean_coherence, config.independent_cells)
     response = np.ones((channels, bins), dtype=np.complex128)
     broadband: list[float] = []
 
@@ -210,6 +237,7 @@ def estimate_transfer(audio_a, audio_b, offset_map, config: StftConfig, plan: Bl
     return Transfer(
         mode=mode, response=response, reliable_fraction=reliable_fraction,
         reliable_cells=reliable_cells, coherence_threshold=coherence_threshold,
-        estimator=estimator, broadband_gain=broadband,
+        estimator=estimator, mean_coherence=mean_coherence,
+        mean_coherence_debiased=mean_coherence_debiased, broadband_gain=broadband,
         band_gain_db=_octave_summary(response, config.sample_rate), warnings=warnings,
     )

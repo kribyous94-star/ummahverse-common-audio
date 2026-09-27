@@ -34,7 +34,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .stft import StftConfig, local_spectra, magnitude_squared_coherence
+from .stft import (StftConfig, debias_coherence, local_spectra,
+                   magnitude_squared_coherence)
 
 #: Méthodes disponibles ; `wiener` est la méthode retenue, les autres sont les baselines.
 METHODS = ("wiener", "average", "min-magnitude", "coherence-mask")
@@ -84,6 +85,9 @@ class BlockDiagnostics:
     @property
     def common_energy_ratio(self) -> float:
         return self.energy_common / self.energy_a if self.energy_a else 0.0
+
+    def debiased_coherence(self, config: "StftConfig") -> float:
+        return debias_coherence(self.mean_coherence, config.independent_cells)
 
     def as_dict(self) -> dict:
         return {

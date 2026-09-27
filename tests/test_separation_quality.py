@@ -221,13 +221,19 @@ def test_no_common_content_yields_a_warning_and_no_invented_common(tmp_path):
                   np.column_stack([first + make_voice(n, 143, 0.0)] * 2))
     b = write_wav(tmp_path / "sans_b.wav",
                   np.column_stack([second + make_voice(n, 187, 0.16)] * 2))
+    from ummahverse_audio.errors import AlignmentError
+
     try:
         result = run_extract(ExtractOptions(input_a=a, input_b=b, out_dir=tmp_path / "out"))
-    except Exception as exc:  # refus explicite : c'est une réponse acceptable
-        assert "montage" in str(exc) or "décalage" in str(exc) or "corrélation" in str(exc)
+    except AlignmentError as exc:  # refus explicite : c'est une réponse acceptable
+        message = exc.user_message()
+        assert "Aucun alignement exploitable" in message
+        assert "montage" in message, "le refus doit expliquer quoi vérifier"
         return
-    # Sinon : un avertissement doit signaler que les entrées ne concordent pas, et le
-    # commun doit rester d'énergie faible devant les entrées.
+    # Sinon : le verdict doit annoncer qu'il n'y a pas de bande commune, un
+    # avertissement doit le répéter, et le commun rester d'énergie faible.
+    assert result.verdict is not None and not result.verdict.usable, result.verdict
+    assert result.verdict.level == "absente", result.verdict.level
     assert result.warnings, "aucun avertissement alors qu'il n'y a pas de bande commune"
     common, _ = read_audio(result.common_path)
     original, _ = read_audio(a)

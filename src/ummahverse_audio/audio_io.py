@@ -28,6 +28,37 @@ ANALYSIS_RATE = 4_000
 ANALYSIS_CHUNK_SECONDS = 10
 
 
+def analysis_weights(channel_layout: str, channels: int) -> np.ndarray:
+    """Pondération des canaux pour la piste d'**alignement** uniquement.
+
+    Sur un mixage cinéma 5.1 ou 7.1, le canal central porte l'essentiel du dialogue —
+    c'est-à-dire précisément ce qui **diffère** entre deux versions linguistiques. Le
+    sommer avec les autres noie le contenu commun sous ce qui ne l'est pas et fait
+    échouer la corrélation. Le LFE est écarté pour la raison inverse : il est très
+    étroit en bande et domine la corrélation sans renseigner sur le reste du spectre.
+
+    L'ordre des canaux FFmpeg pour 5.1/7.1 commence par FL, FR, FC, LFE ; seuls FC et
+    LFE sont écartés, et seulement si l'agencement est reconnu. Cette pondération ne
+    touche que l'alignement : aucune sortie n'est jamais issue d'une somme de canaux.
+    """
+    weights = np.ones(channels, dtype=np.float64)
+    layout = (channel_layout or "").lower()
+    if channels >= 6 and (layout.startswith("5.1") or layout.startswith("7.1")
+                          or layout.startswith("6.1") or layout == "inconnu"):
+        # Seuls les avants gauche/droite servent à l'alignement. Le centre porte le
+        # dialogue, donc ce qui diffère ; le LFE est trop étroit en bande ; et les
+        # surrounds peuvent avoir leur propre retard d'une version à l'autre — mesuré
+        # à +68 ms sur un film réel. Les mélanger reviendrait à chercher un décalage
+        # unique pour des canaux qui n'en partagent pas, et à ne trouver ni l'un ni
+        # l'autre. Le retard propre de chaque canal est mesuré ensuite, séparément.
+        weights[:] = 0.0
+        weights[0] = 1.0   # FL
+        weights[1] = 1.0   # FR
+    if not weights.any():
+        weights[:] = 1.0
+    return weights / weights.sum()
+
+
 def release_pages(array: np.ndarray, first_byte: int, last_byte: int) -> None:
     """Rend au système les pages déjà consommées d'un `numpy.memmap`.
 
@@ -149,9 +180,12 @@ class DecodedAudio:
     def analysis_track(self, rate: int = ANALYSIS_RATE) -> tuple[np.ndarray, int]:
         """Piste mono décimée servant **uniquement** à l'alignement.
 
-        La somme des canaux n'est jamais écrite dans une sortie : les canaux
-        restent séparés et dans leur ordre d'origine pour tout le traitement.
+        Les canaux sont combinés avec `analysis_weights`, qui écarte le canal central
+        et le LFE d'un mixage multicanal. Cette combinaison n'est jamais écrite dans
+        une sortie : les canaux restent séparés et dans leur ordre d'origine pour tout
+        le traitement.
         """
+        weights = analysis_weights(self.stream.effective_layout, self.channels)
         factor = max(int(round(self.sample_rate / rate)), 1)
         effective_rate = self.sample_rate / factor
         if factor == 1:
@@ -159,7 +193,7 @@ class DecodedAudio:
             pieces = []
             for start in range(0, self.frames, chunk):
                 pieces.append(np.asarray(self.data[start:start + chunk],
-                                         dtype=np.float32).mean(axis=1))
+                                         dtype=np.float32) @ weights)
                 self.release_until(start)
             self.release_all()
             track = (np.concatenate(pieces) if pieces
@@ -177,7 +211,7 @@ class DecodedAudio:
             stop = min(start + chunk, self.frames)
             low = max(start - overlap, 0)
             high = min(stop + overlap, self.frames)
-            mono = np.asarray(self.data[low:high], dtype=np.float64).mean(axis=1)
+            mono = np.asarray(self.data[low:high], dtype=np.float64) @ weights
             if mono.size <= 27:  # trop court pour le filtre anti-repliement
                 decimated = mono[::factor]
                 head = tail = 0

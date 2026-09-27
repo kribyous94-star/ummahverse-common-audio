@@ -32,6 +32,9 @@ _REFINE_UPSAMPLE = 32
 MIN_PEAK_RATIO = 10.0
 #: Corrélation normalisée minimale pour juger un décalage crédible.
 MIN_CONFIDENCE = 0.05
+#: Au-delà, la corrélation de forme d'onde est franche : elle prime sur l'enveloppe.
+DECISIVE_CONFIDENCE = 0.30
+DECISIVE_PEAK_RATIO = 60.0
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,8 @@ class DelayEstimate:
     integer_delay: int
     confidence: float
     peak_ratio: float
+    method: str = "waveform"
+    """« waveform » (GCC-PHAT) ou « envelope » (corrélation d'enveloppes d'énergie)."""
 
     @property
     def fractional(self) -> float:
@@ -128,14 +133,87 @@ def gcc_phat(x: np.ndarray, y: np.ndarray, max_shift: int | None = None,
     return DelayEstimate(delay, integer_delay, confidence, peak_ratio)
 
 
+#: Pas de l'enveloppe d'énergie utilisée en repli d'alignement, en secondes.
+ENVELOPE_HOP_S = 0.01
+#: Corrélation d'enveloppes en deçà de laquelle même le repli est jugé inexploitable.
+MIN_ENVELOPE_CORRELATION = 0.25
+
+
+def energy_envelope(track: np.ndarray, rate: int,
+                    hop_s: float = ENVELOPE_HOP_S) -> tuple[np.ndarray, float]:
+    """Enveloppe d'énergie en décibels, et sa fréquence de trame.
+
+    L'enveloppe décrit *quand* ça joue fort, pas *quoi* : elle survit à un remixage,
+    à une égalisation et à un changement de master. C'est ce qui permet d'aligner deux
+    versions dont les formes d'onde ne se ressemblent plus.
+    """
+    hop = max(int(round(hop_s * rate)), 1)
+    usable = (track.size // hop) * hop
+    if usable < hop * 8:
+        return np.zeros(0, dtype=np.float64), rate / hop
+    frames = np.asarray(track[:usable], dtype=np.float64).reshape(-1, hop)
+    power = np.mean(frames * frames, axis=1)
+    floor = 1e-10 * float(np.mean(power)) + 1e-20
+    return np.log(power + floor), rate / hop
+
+
+def envelope_delay(track_a: np.ndarray, track_b: np.ndarray, rate: int,
+                   max_delay_s: float = 30.0) -> DelayEstimate:
+    """Décalage estimé par corrélation des enveloppes d'énergie.
+
+    Repli utilisé quand la corrélation de forme d'onde ne donne rien de cohérent : il
+    permet de distinguer deux situations que rien ne séparait jusqu'ici — « impossible
+    d'aligner » et « aligné correctement, mais les deux versions ne partagent aucun
+    contenu ». La résolution est celle du pas d'enveloppe (10 ms par défaut), donc
+    suffisante pour amorcer l'affinage local, pas pour annuler quoi que ce soit.
+    """
+    envelope_a, frame_rate = energy_envelope(track_a, rate)
+    envelope_b, _ = energy_envelope(track_b, rate)
+    if envelope_a.size < 16 or envelope_b.size < 16:
+        return DelayEstimate(0.0, 0, 0.0, 0.0, method="envelope")
+
+    x = envelope_a - envelope_a.mean()
+    y = envelope_b - envelope_b.mean()
+    size = 1 << int(np.ceil(np.log2(x.size + y.size)))
+    correlation = np.fft.irfft(np.fft.rfft(x, size) * np.conj(np.fft.rfft(y, size)), size)
+    correlation = np.concatenate((correlation[size // 2:], correlation[: size // 2]))
+    lags = np.arange(-(size // 2), size // 2)
+
+    limit = max(int(round(max_delay_s * frame_rate)), 1)
+    window = (lags >= -limit) & (lags <= limit)
+    correlation, lags = correlation[window], lags[window]
+    norm = float(np.linalg.norm(x) * np.linalg.norm(y))
+    if norm <= 0 or correlation.size == 0:
+        return DelayEstimate(0.0, 0, 0.0, 0.0, method="envelope")
+    correlation = correlation / norm
+
+    peak = int(np.argmax(correlation))
+    frames_delay = float(-lags[peak])
+    delay = frames_delay * rate / frame_rate
+    rms = float(np.sqrt(np.mean(correlation ** 2))) or 1e-30
+    return DelayEstimate(delay, int(round(delay)),
+                         confidence=float(max(correlation[peak], 0.0)),
+                         peak_ratio=float(abs(correlation[peak]) / rms),
+                         method="envelope")
+
+
 def estimate_global_delay(track_a: np.ndarray, track_b: np.ndarray, rate: int,
                           max_delay_s: float = 30.0,
                           probe_count: int = 9,
                           probe_seconds: float = 20.0) -> DelayEstimate:
-    """Décalage global estimé sur plusieurs sondes réparties dans le signal.
+    """Décalage global, en confrontant deux mesures indépendantes.
 
-    Plusieurs sondes évitent qu'un générique musical ou un silence prolongé
-    impose un décalage faux, et permettent de rester en mémoire bornée sur un film.
+    La corrélation de forme d'onde (GCC-PHAT) est précise mais fragile : sur deux
+    versions remixées elle ne trouve que des pics fortuits, d'autant plus facilement
+    que la fenêtre de recherche est large devant la durée analysée. La corrélation
+    d'enveloppes d'énergie est grossière (10 ms) mais robuste : elle survit à un
+    remixage, parce qu'elle décrit *quand* ça joue et non *quoi*.
+
+    Les deux sont donc calculées, et l'enveloppe sert d'**arbitre** : un décalage de
+    forme d'onde qui la contredit est un faux pic. Aligner quand même, plutôt que
+    refuser, est important — cela permet de distinguer « impossible d'aligner » de
+    « bien aligné, mais aucun contenu commun », deux diagnostics très différents pour
+    l'utilisateur.
     """
     shortest = min(track_a.size, track_b.size)
     silent = [name for name, track in (("A", track_a), ("B", track_b))
@@ -148,17 +226,56 @@ def estimate_global_delay(track_a: np.ndarray, track_b: np.ndarray, rate: int,
             "source ; un flux de commentaire ou une piste muette est un cas fréquent.",
         )
     # Sur un extrait court, chercher ±30 s n'a pas de sens : la fenêtre de recherche
-    # est bornée à la moitié du signal, sans quoi le pic est estimé sur un
+    # est bornée à une fraction du signal, sans quoi le pic est estimé sur un
     # recouvrement minuscule et la confiance n'a plus de valeur.
-    max_shift = max(min(int(round(max_delay_s * rate)), shortest // 2), 1)
+    max_shift = max(min(int(round(max_delay_s * rate)), shortest // 4), 1)
+
+    envelope = envelope_delay(track_a, track_b, rate, max_delay_s=max_delay_s)
+    waveform = _waveform_delay(track_a, track_b, rate, max_shift,
+                               probe_count, probe_seconds)
+
+    tolerance = max(int(round(0.25 * rate)), 1)
+    envelope_usable = envelope.confidence >= MIN_ENVELOPE_CORRELATION
+    if waveform is not None:
+        # Une corrélation de forme d'onde franche se suffit à elle-même : elle est plus
+        # précise que l'enveloppe, et l'enveloppe peut se tromper sur un signal
+        # périodique (une musique en boucle, un motif de parole régulier).
+        decisive = (waveform.confidence >= DECISIVE_CONFIDENCE
+                    or waveform.peak_ratio >= DECISIVE_PEAK_RATIO)
+        agrees = (not envelope_usable
+                  or abs(waveform.integer_delay - envelope.integer_delay) <= tolerance)
+        if decisive or agrees:
+            return waveform
+
+    if not envelope_usable:
+        detail = (f"forme d'onde {'sans pic net' if waveform is None else 'incohérente'}, "
+                  f"enveloppe {envelope.confidence:.3f}")
+        raise AlignmentError(
+            f"Aucun alignement exploitable entre les deux entrées ({detail}).",
+            "Les deux pistes proviennent-elles du même montage ? Un décalage supérieur "
+            "à --max-offset secondes est aussi possible.",
+        )
+
+    # L'enveloppe tranche. La forme d'onde peut encore l'affiner, mais seulement dans
+    # une fenêtre étroite autour d'elle, où un pic ne peut plus être fortuit.
+    window = max(int(round(0.05 * rate)), 8)
+    refined = gcc_phat(track_a, track_b, max_shift=window, center=envelope.integer_delay)
+    if refined.peak_ratio >= MIN_PEAK_RATIO:
+        return DelayEstimate(refined.delay, refined.integer_delay,
+                             max(refined.confidence, envelope.confidence),
+                             refined.peak_ratio, method="envelope+waveform")
+    return envelope
+
+
+def _waveform_delay(track_a: np.ndarray, track_b: np.ndarray, rate: int,
+                    max_shift: int, probe_count: int,
+                    probe_seconds: float) -> DelayEstimate | None:
+    """Décalage par GCC-PHAT, ou `None` si les sondes ne s'accordent sur rien."""
+    shortest = min(track_a.size, track_b.size)
     if shortest < 4 * max_shift or shortest < int(2 * probe_seconds * rate):
         estimate = gcc_phat(track_a, track_b, max_shift=max_shift)
         if estimate.peak_ratio < MIN_PEAK_RATIO and estimate.confidence < MIN_CONFIDENCE:
-            raise AlignmentError(
-                "Aucun décalage global n'a pu être estimé entre les deux entrées.",
-                "Les deux pistes proviennent-elles du même montage ? "
-                "Un décalage supérieur à --max-offset secondes est aussi possible.",
-            )
+            return None
         return estimate
 
     probe_len = int(probe_seconds * rate)
@@ -181,19 +298,15 @@ def estimate_global_delay(track_a: np.ndarray, track_b: np.ndarray, rate: int,
     credible = [r for r in results
                 if r.confidence >= MIN_CONFIDENCE or r.peak_ratio >= MIN_PEAK_RATIO]
     if not credible:
-        raise AlignmentError(
-            "Aucune sonde d'alignement n'atteint une corrélation exploitable.",
-            "Vérifiez que A et B sont deux versions du même montage, et que le décalage "
-            "reste sous --max-offset secondes.",
-        )
+        return None
     delays = np.array([r.integer_delay for r in credible], dtype=np.float64)
     median = float(np.median(delays))
-    # Raffine autour de la médiane sur la sonde la plus fiable.
-    best = max(credible, key=lambda r: r.confidence)
     coherent = [r for r in credible if abs(r.integer_delay - median) <= rate * 0.5]
-    if coherent:
-        best = max(coherent, key=lambda r: r.confidence)
+    # Des sondes qui ne s'accordent pas signalent des pics fortuits, pas un alignement.
+    if len(coherent) < max(2, len(credible) // 2):
+        return None
     spread = float(np.std(delays)) / rate
+    best = max(coherent, key=lambda r: r.confidence)
     return DelayEstimate(best.delay, int(round(median)), best.confidence,
                          peak_ratio=best.peak_ratio if spread < 0.5 else 0.0)
 
@@ -294,14 +407,23 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
         audio_a.release_until(int(start) - 2 * block_frames)
         audio_b.release_until(int(start) + center - 2 * block_frames)
 
-    comparable = confidences >= confidence_threshold
     notes: list[str] = []
 
+    # Ce drapeau répond à « puis-je faire confiance au décalage local ici ? », pas à
+    # « y a-t-il du contenu commun ? ». La seconde question est tranchée plus tard par
+    # l'estimateur lui-même : là où rien n'est partagé, la puissance commune tombe
+    # naturellement à zéro. Exiger en plus une corrélation de forme d'onde élevée
+    # écarterait des blocs parfaitement alignés dont les mixages diffèrent un peu —
+    # mesuré sur du vrai 5.1 : 19 % de blocs retenus pour 71 % de cohérence réelle.
+    confident = confidences >= confidence_threshold
+    anchor = float(np.median(delays[confident])) if confident.any() else base
+    # Un décalage qui tombe sur la même valeur que ses voisins est une preuve
+    # d'alignement en soi, même quand la corrélation brute reste modeste.
+    consistent = np.abs(delays - anchor) <= max(fine_search, audio_a.sample_rate * 0.02)
+    comparable = confident | consistent
+
     # Décalages incohérents => on retombe sur la référence globale et on marque le bloc.
-    if comparable.any():
-        reference = float(np.median(delays[comparable]))
-    else:
-        reference = base
+    reference = float(np.median(delays[comparable])) if comparable.any() else anchor
     outliers = np.abs(delays - reference) > max(fine_search * 4, audio_a.sample_rate * 0.5)
     if outliers.any():
         notes.append(
@@ -319,8 +441,8 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
         )
     if comparable.size and comparable.mean() < 0.5:
         notes.append(
-            f"Seulement {comparable.mean() * 100:.0f} % des blocs sont comparables : "
-            "montages probablement différents ou peu de contenu commun."
+            f"Seulement {comparable.mean() * 100:.0f} % des blocs ont un décalage local "
+            "fiable : montages probablement différents, ou coupes entre les versions."
         )
 
     return OffsetMap(
@@ -329,6 +451,79 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
         global_delay=float(global_delay.delay), drift_ppm=drift_ppm,
         threshold=confidence_threshold, notes=notes,
     )
+
+
+#: Décalage par canal recherché au-delà du décalage commun, en secondes.
+CHANNEL_OFFSET_SEARCH_S = 0.12
+
+
+def estimate_channel_offsets(audio_a, audio_b, offset_map, plan,
+                             probe_blocks: int = 24,
+                             search_s: float = CHANNEL_OFFSET_SEARCH_S,
+                             progress=None) -> tuple[np.ndarray, np.ndarray]:
+    """Décalage propre à chaque canal, en plus du décalage commun.
+
+    Un mixage 5.1 n'est pas forcément synchrone canal par canal d'une version à
+    l'autre : mesuré sur un film réel, les avants étaient à −46 ms et les surrounds à
+    +22 ms entre la version anglaise et la version française. Avec un décalage unique,
+    les surrounds ne s'annulent pas du tout — ils ressortent entiers dans les résidus.
+
+    La mesure se fait sur des blocs répartis dans le signal ; la médiane pondérée par
+    la netteté du pic sert de décalage retenu, et un canal sans pic net garde zéro,
+    c'est-à-dire le décalage commun.
+
+    Retourne `(décalages en trames, confiance par canal)`.
+    """
+    channels = audio_a.channels
+    offsets = np.zeros(channels, dtype=np.float64)
+    confidences = np.zeros(channels, dtype=np.float64)
+    search = max(int(round(search_s * audio_a.sample_rate)), 16)
+    limit = min(search, plan.margin // 2)
+
+    indices = np.flatnonzero(offset_map.comparable)
+    if indices.size == 0:
+        return offsets, confidences
+    picks = indices[np.linspace(0, indices.size - 1,
+                                min(probe_blocks, indices.size)).astype(int)]
+
+    per_channel: list[list[tuple[float, float]]] = [[] for _ in range(channels)]
+    for position, index in enumerate(picks):
+        if progress is not None:
+            progress.step(position / max(picks.size, 1), "décalage par canal")
+        start = int(offset_map.starts[index])
+        integer, _ = int(np.rint(offset_map.delays[index])), 0.0
+        block_a = audio_a.read(start, plan.block_frames)
+        block_b = audio_b.read(start + integer - limit, plan.block_frames + 2 * limit)
+        for channel in range(channels):
+            local = gcc_phat(block_a[:, channel], block_b[:, channel],
+                             max_shift=limit, center=limit)
+            shift = local.delay - limit
+            if abs(shift) <= limit:
+                per_channel[channel].append((shift, local.peak_ratio))
+
+    tolerance = max(0.008 * audio_a.sample_rate, limit * 0.1)
+    for channel in range(channels):
+        samples = per_channel[channel]
+        if not samples:
+            continue
+        values = np.array([v for v, _ in samples])
+        weights = np.array([w for _, w in samples])
+        # Une sonde qui bute sur le bord de la fenêtre de recherche n'a rien mesuré :
+        # c'est un échec, pas un décalage, et la garder fausse toute dispersion.
+        usable = (weights >= MIN_PEAK_RATIO) & (np.abs(values) < 0.9 * limit)
+        if usable.sum() < max(3, len(samples) // 4):
+            continue
+        candidates = values[usable]
+        # Consensus plutôt qu'écart-type : les sondes qui échouent produisent des
+        # valeurs dispersées qui feraient exploser une variance, mais ne déplacent pas
+        # le groupe majoritaire.
+        centre = float(np.median(candidates))
+        agreeing = np.abs(candidates - centre) <= tolerance
+        if agreeing.sum() < max(3, candidates.size // 3):
+            continue
+        offsets[channel] = float(np.median(candidates[agreeing]))
+        confidences[channel] = float(agreeing.sum() / len(samples))
+    return offsets, confidences
 
 
 def _estimate_drift_ppm(starts: np.ndarray, delays: np.ndarray,
