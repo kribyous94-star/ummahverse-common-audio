@@ -167,6 +167,7 @@ class AccumulatorSink:
         self.sample_rate = sample_rate
         self._acc = workspace.memmap(f"{name}.acc", (frames, channels))
         self._weights = workspace.memmap(f"{name}.w", (frames,))
+        self._released = 0
 
     def add(self, start: int, block: np.ndarray, weights: np.ndarray) -> None:
         lo = max(start, 0)
@@ -180,12 +181,30 @@ class AccumulatorSink:
         self._acc[lo:hi] += piece
         self._weights[lo:hi] += weights[offset:offset + length].astype(np.float32)
 
+    def release_until(self, frame: int) -> None:
+        """Libère les pages de l'accumulateur derrière la position d'écriture.
+
+        L'accumulation progresse dans l'ordre à la dérive près, donc les trames très en
+        arrière sont définitives. `MADV_DONTNEED` sur une cartographie partagée ne perd
+        aucune écriture : les pages modifiées restent celles du cache de fichiers.
+        """
+        from .audio_io import release_pages
+
+        frame = max(min(frame, self.frames), 0)
+        if frame <= self._released:
+            return
+        release_pages(self._acc, self._released * self.channels * 4,
+                      frame * self.channels * 4)
+        release_pages(self._weights, self._released * 4, frame * 4)
+        self._released = frame
+
     def iter_common(self, chunk: int = FLUSH_CHUNK):
         """Parcourt le commun accumulé par tranches : `(start, common, usable)`.
 
         Les trames dont le poids cumulé est insuffisant sont rendues à zéro et
         signalées par `usable=False`, jamais extrapolées.
         """
+        self._released = 0
         for start in range(0, self.frames, chunk):
             stop = min(start + chunk, self.frames)
             weights = np.asarray(self._weights[start:stop], dtype=np.float64)
@@ -194,6 +213,7 @@ class AccumulatorSink:
             np.divide(np.asarray(self._acc[start:stop], dtype=np.float64),
                       weights[:, None], out=common, where=usable[:, None])
             yield start, common, usable
+            self.release_until(stop)
 
     def write_common(self, destination: Path, channel_layout: str,
                      sample_format: str = "float32") -> Path:
@@ -218,8 +238,10 @@ class AccumulatorSink:
         reconstruction_error = 0.0
         writer = WavWriter(destination, self.sample_rate, self.channels,
                            source.stream.effective_layout, sample_format)
+        source.release_all()   # nouvelle passe séquentielle sur la source
         try:
             for start, common, usable in self.iter_common():
+                source.release_until(start - 2 * FLUSH_CHUNK)
                 if progress is not None:
                     progress.step(start / max(self.frames, 1), f"écriture {destination.name}")
                 untreated.add_mask(start, ~usable)

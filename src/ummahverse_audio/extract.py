@@ -153,6 +153,8 @@ def run_extract(options: ExtractOptions, progress: Progress | None = None) -> Ex
         )
         del track_a, track_b
         warnings += offset_map.notes
+        audio_a.release_all()
+        audio_b.release_all()
         watch.mark("align")
 
         progress.stage("Estimation du gain et de l'égalisation entre versions")
@@ -165,6 +167,9 @@ def run_extract(options: ExtractOptions, progress: Progress | None = None) -> Ex
         warnings += transfer.warnings
         progress.log("Gain large bande par canal : "
                      + ", ".join(f"{g:.4f}" for g in transfer.broadband_gain))
+        # Les sondes de gain sont réparties dans tout le film : mêmes précautions.
+        audio_a.release_all()
+        audio_b.release_all()
         watch.mark("transfer")
 
         progress.stage("Estimation du commun bloc par bloc")
@@ -242,6 +247,11 @@ def _process_blocks(audio_a, audio_b, offset_map, config: StftConfig, plan: Bloc
             useful = slice(plan.margin, plan.margin + plan.block_frames)
             sink_a.add(start, common_a[useful], weights)
             sink_b.add(start + integer, common_b[useful], weights)
+            # Les entrées ne sont plus relues en arrière : on rend les pages au système
+            # pour que le pic mémoire ne suive pas la durée du film.
+            audio_a.release_until(start - 2 * plan.block_frames)
+            audio_b.release_until(start + integer - 2 * plan.block_frames)
+            sink_b.release_until(start + integer - 4 * plan.block_frames)
             summary.blocks_processed += 1
             timeline.append(_timeline_entry(start, audio_a.sample_rate, delay, offset_map,
                                            index, block_diagnostics))

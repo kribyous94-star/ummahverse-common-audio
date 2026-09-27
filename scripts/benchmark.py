@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from ummahverse_audio.extract import ExtractOptions, run_extract  # noqa: E402
+from ummahverse_audio.ffmpeg_tools import WavWriter, probe_audio_streams  # noqa: E402
 from ummahverse_audio.metrics import (EvaluationWindow, decompose, delayed,  # noqa: E402
                                       read_audio, si_sdr)
 from ummahverse_audio.subtract import SubtractOptions, run_subtract  # noqa: E402
@@ -31,8 +32,8 @@ from ummahverse_audio.subtract import SubtractOptions, run_subtract  # noqa: E40
 #: Variantes comparées. La première est la méthode retenue.
 VARIANTS: list[tuple[str, dict]] = [
     ("wiener (retenue)", {"method": "wiener", "transfer_mode": "band"}),
-    ("wiener sans correction de biais", {"method": "wiener", "transfer_mode": "band",
-                                         "bias_correction": 0.0}),
+    ("wiener avec correction de biais", {"method": "wiener", "transfer_mode": "band",
+                                         "bias_correction": 1.0}),
     ("wiener, gain large bande seul", {"method": "wiener", "transfer_mode": "gain"}),
     ("wiener, aucune transformation", {"method": "wiener", "transfer_mode": "none"}),
     ("baseline moyenne complexe", {"method": "average", "transfer_mode": "band"}),
@@ -142,32 +143,51 @@ def perf_fixture(fixtures: Path, seconds: float, destination: Path) -> tuple[Pat
 
     La qualité n'est pas évaluée sur ce signal (la répétition crée des raccords
     artificiels) : seuls le temps et la mémoire le sont.
-    """
-    from scipy.io import wavfile
 
+    L'écriture se fait **en flux**. Ce n'est pas un détail : `ru_maxrss` d'un enfant
+    hérite du pic du parent au moment du `fork`, donc un parent qui construirait le
+    signal long en mémoire rendrait fausse toute mesure de mémoire de l'enfant.
+    """
     destination.mkdir(parents=True, exist_ok=True)
     outputs = []
     for name in ("a", "b"):
         data, rate = read_audio(fixtures / f"{name}.wav")
-        repeats = int(np.ceil(seconds * rate / data.shape[0]))
-        tiled = np.tile(data, (repeats, 1))[: int(seconds * rate)]
+        block = data.astype(np.float32)
+        remaining = int(seconds * rate)
         path = destination / f"{name}_long.wav"
-        wavfile.write(path, rate, tiled.astype(np.float32))
+        with WavWriter(path, rate, block.shape[1], "stereo") as writer:
+            while remaining > 0:
+                piece = block[:remaining]
+                writer.write(piece)
+                remaining -= piece.shape[0]
         outputs.append(path)
     return outputs[0], outputs[1]
 
 
 def measure_performance(long_a: Path, long_b: Path, out_dir: Path) -> dict:
+    """Mesure temps et pic mémoire dans un **processus neuf**.
+
+    `ru_maxrss` est un maximum sur la vie du processus et ne redescend jamais : mesuré
+    dans le processus du banc, il cumulerait les pics des exécutions précédentes.
+    Chaque mesure passe donc par la vraie commande, comme un utilisateur la lance.
+    """
+    # Surtout ne pas charger le signal long ici : la durée vient de ffprobe.
+    stream = probe_audio_streams(long_a)[0]
+    duration = stream.duration_s or 0.0
     started = time.monotonic()
-    result = run_extract(ExtractOptions(input_a=long_a, input_b=long_b, out_dir=out_dir))
+    completed = subprocess.run(
+        [sys.executable, "-m", "ummahverse_audio", "extract",
+         "--input-a", str(long_a), "--input-b", str(long_b),
+         "--out-dir", str(out_dir), "--quiet"],
+        check=True, stdout=subprocess.DEVNULL, cwd=str(ROOT))
     elapsed = time.monotonic() - started
-    data, rate = read_audio(long_a)
-    duration = data.shape[0] / rate
+    assert completed.returncode == 0
+    metadata = json.loads((out_dir / "common.json").read_text(encoding="utf-8"))
     return {
         "audio_seconds": round(duration, 1),
         "extract_seconds": round(elapsed, 2),
         "realtime_factor": round(duration / elapsed, 2),
-        "performance": result.metadata["performance"],
+        "performance": metadata["performance"],
     }
 
 
@@ -179,7 +199,7 @@ def _fmt(value) -> str:
     return str(value)
 
 
-def to_markdown(results: list[dict], performance: dict | None, window: EvaluationWindow,
+def to_markdown(results: list[dict], performance: list[dict], window: EvaluationWindow,
                 info: dict) -> str:
     lines = [
         "# Résultats mesurés sur le jeu synthétique",
@@ -229,11 +249,11 @@ def to_markdown(results: list[dict], performance: dict | None, window: Evaluatio
     if performance:
         lines += ["", "## Coût de traitement", "",
                   "| Durée audio (s) | extract (s) | facteur temps réel | pic RSS (Mio) |",
-                  "|---|---|---|---|",
-                  "| {} | {} | {} | {} |".format(
-                      performance["audio_seconds"], performance["extract_seconds"],
-                      performance["realtime_factor"],
-                      performance["performance"].get("peak_rss_mb", "—"))]
+                  "|---|---|---|---|"]
+        for entry in performance:
+            lines.append("| {} | {} | {} | {} |".format(
+                entry["audio_seconds"], entry["extract_seconds"], entry["realtime_factor"],
+                entry["performance"].get("peak_rss_mb", "—")))
     return "\n".join(lines) + "\n"
 
 
@@ -242,8 +262,9 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=ROOT / "benchmarks")
     parser.add_argument("--fixtures", type=Path, default=None,
                         help="jeu existant (défaut : généré dans --out-dir/fixtures)")
-    parser.add_argument("--perf-seconds", type=float, default=0.0,
-                        help="mesure aussi le coût sur un signal long de cette durée")
+    parser.add_argument("--perf-seconds", default="",
+                        help="durées (en secondes, séparées par des virgules) pour lesquelles "
+                             "mesurer le coût de traitement, par exemple 120,600")
     parser.add_argument("--only", action="append", default=None,
                         help="limite aux variantes dont le nom contient cette chaîne")
     args = parser.parse_args()
@@ -266,11 +287,13 @@ def main() -> int:
         results.append(run_variant(name, overrides, fixtures, out_dir / "runs",
                                    references, window))
 
-    performance = None
-    if args.perf_seconds > 0:
-        print(f"→ mesure de coût sur {args.perf_seconds:.0f} s", flush=True)
-        long_a, long_b = perf_fixture(fixtures, args.perf_seconds, out_dir / "long")
-        performance = measure_performance(long_a, long_b, out_dir / "runs" / "long")
+    durations = [float(token) for token in args.perf_seconds.split(",") if token.strip()]
+    performance = []
+    for seconds in durations:
+        print(f"→ mesure de coût sur {seconds:.0f} s", flush=True)
+        long_a, long_b = perf_fixture(fixtures, seconds, out_dir / f"long{int(seconds)}")
+        performance.append(measure_performance(long_a, long_b,
+                                              out_dir / "runs" / f"long{int(seconds)}"))
 
     payload = {"fixture": info, "evaluation_window": window.as_dict(),
                "variants": results, "performance": performance}

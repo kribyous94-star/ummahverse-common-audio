@@ -289,6 +289,10 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
         fine = gcc_phat(block_a, block_b, max_shift=pad, refine=True)
         delays[position] = fine.delay + center - pad
         confidences[position] = max(fine.confidence, coarse.confidence * 0.5)
+        # Cette passe parcourt tout le signal : on rend les pages déjà lues, sinon le
+        # cache de fichiers du processus finit par contenir les deux films entiers.
+        audio_a.release_until(int(start) - 2 * block_frames)
+        audio_b.release_until(int(start) + center - 2 * block_frames)
 
     comparable = confidences >= confidence_threshold
     notes: list[str] = []

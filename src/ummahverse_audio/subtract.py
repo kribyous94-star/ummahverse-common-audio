@@ -133,6 +133,8 @@ def run_subtract(options: SubtractOptions, progress: Progress | None = None) -> 
             progress=SubProgress(progress, 0.15, 0.30))
         warnings += offset_map.notes
         del track_common, track_c
+        audio_common.release_all()
+        audio_c.release_all()
         watch.mark("align")
 
         progress.stage("Estimation de la transformation du commun")
@@ -146,6 +148,8 @@ def run_subtract(options: SubtractOptions, progress: Progress | None = None) -> 
         warnings += transfer.warnings
         progress.log("Gain appliqué au commun par canal : "
                      + ", ".join(f"{g:.4f}" for g in transfer.broadband_gain))
+        audio_common.release_all()
+        audio_c.release_all()
         watch.mark("transfer")
 
         progress.stage("Soustraction bloc par bloc")
@@ -260,6 +264,9 @@ def _subtract_blocks(audio_common, audio_c, offset_map, config: StftConfig, plan
 
         useful = slice(plan.margin, plan.margin + plan.block_frames)
         sink.add(start + integer, adapted[useful], weights)
+        audio_common.release_until(start - 2 * plan.block_frames)
+        audio_c.release_until(start + integer - 2 * plan.block_frames)
+        sink.release_until(start + integer - 4 * plan.block_frames)
         mean_gain = float(np.mean(block_gains))
         gains.append(mean_gain)
         reliable_fractions.append(float(np.mean(block_reliable)))

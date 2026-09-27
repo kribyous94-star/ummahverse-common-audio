@@ -7,6 +7,7 @@ le pipeline travaille par blocs et le système gère le cache disque.
 
 from __future__ import annotations
 
+import mmap
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -22,6 +23,35 @@ from .ffmpeg_tools import AudioStreamInfo, decode_to_raw, probe_audio_streams, s
 DEFAULT_SAMPLE_RATE = 48_000
 #: Fréquence de la piste d'analyse servant à l'alignement grossier.
 ANALYSIS_RATE = 4_000
+#: Durée des tranches de décimation : borne la mémoire du filtrage anti-repliement.
+ANALYSIS_CHUNK_SECONDS = 10
+
+
+def release_pages(array: np.ndarray, first_byte: int, last_byte: int) -> None:
+    """Rend au système les pages déjà consommées d'un `numpy.memmap`.
+
+    Sans cela, le pic de mémoire résidente d'un film croît avec sa durée : les pages
+    des PCM intermédiaires restent dans le cache tant que la cartographie vit. Ces
+    pages sont adossées à un fichier, donc réclamables par le système — le processus
+    ne tombe pas sans cette libération, il occupe simplement toute la RAM
+    disponible. `MADV_DONTNEED` sur une cartographie partagée ne perd aucune écriture
+    (les pages modifiées appartiennent au cache de pages et sont réécrites par le
+    noyau) ; l'appel est sans effet là où l'avis n'existe pas, par exemple sous
+    Windows.
+    """
+    memory = getattr(array, "_mmap", None)
+    advice = getattr(mmap, "MADV_DONTNEED", None)
+    if memory is None or advice is None or not hasattr(memory, "madvise"):
+        return
+    granularity = mmap.ALLOCATIONGRANULARITY
+    start = max((first_byte // granularity) * granularity, 0)
+    length = min(last_byte, len(memory)) - start
+    if length <= 0:
+        return
+    try:
+        memory.madvise(advice, start, length)
+    except (OSError, ValueError):  # avis refusé : ce n'est qu'une optimisation
+        pass
 
 
 class Workspace:
@@ -59,6 +89,7 @@ class DecodedAudio:
     raw_path: Path
     resampled: bool
     data: np.memmap = field(init=False, repr=False)
+    _released: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.data = np.memmap(self.raw_path, dtype=np.float32, mode="r",
@@ -77,6 +108,24 @@ class DecodedAudio:
             out[lo - start:hi - start] = self.data[lo:hi]
         return out
 
+    def release_until(self, frame: int) -> None:
+        """Libère les pages des trames antérieures à `frame`, déjà traitées.
+
+        Seule la tranche nouvellement consommée est signalée, pour ne pas reparcourir
+        la table des pages à chaque bloc.
+        """
+        frame = max(frame, 0)
+        if frame <= self._released:
+            return
+        stride = self.channels * 4
+        release_pages(self.data, self._released * stride, frame * stride)
+        self._released = frame
+
+    def release_all(self) -> None:
+        """Libère tout, et réarme la libération progressive pour une nouvelle passe."""
+        release_pages(self.data, 0, self.frames * self.channels * 4)
+        self._released = 0
+
     def analysis_track(self, rate: int = ANALYSIS_RATE) -> tuple[np.ndarray, int]:
         """Piste mono décimée servant **uniquement** à l'alignement.
 
@@ -85,18 +134,42 @@ class DecodedAudio:
         """
         factor = max(int(round(self.sample_rate / rate)), 1)
         effective_rate = self.sample_rate / factor
-        chunk = self.sample_rate * 60
-        pieces: list[np.ndarray] = []
+        if factor == 1:
+            chunk = ANALYSIS_CHUNK_SECONDS * self.sample_rate
+            pieces = []
+            for start in range(0, self.frames, chunk):
+                pieces.append(np.asarray(self.data[start:start + chunk],
+                                         dtype=np.float32).mean(axis=1))
+                self.release_until(start)
+            self.release_all()
+            track = (np.concatenate(pieces) if pieces
+                     else np.zeros(0, dtype=np.float32))
+            return track, int(round(effective_rate))
+
+        # Tranches courtes (mémoire bornée quelle que soit la durée) et chevauchement
+        # multiple du facteur : la grille décimée reste alignée et les transitoires du
+        # filtre anti-repliement sont rognés au lieu d'être laissés dans la piste.
+        chunk = ANALYSIS_CHUNK_SECONDS * self.sample_rate - (
+            (ANALYSIS_CHUNK_SECONDS * self.sample_rate) % factor)
+        overlap = 64 * factor
+        pieces = []
         for start in range(0, self.frames, chunk):
-            block = np.asarray(self.data[start:start + chunk], dtype=np.float64)
-            mono = block.mean(axis=1)
-            if factor > 1:
-                if mono.size <= 27:  # trop court pour le filtre anti-repliement
-                    mono = mono[::factor]
-                else:
-                    mono = decimate(mono, factor, ftype="fir", zero_phase=True)
-            pieces.append(np.asarray(mono, dtype=np.float32))
+            stop = min(start + chunk, self.frames)
+            low = max(start - overlap, 0)
+            high = min(stop + overlap, self.frames)
+            mono = np.asarray(self.data[low:high], dtype=np.float64).mean(axis=1)
+            if mono.size <= 27:  # trop court pour le filtre anti-repliement
+                decimated = mono[::factor]
+                head = tail = 0
+            else:
+                decimated = decimate(mono, factor, ftype="fir", zero_phase=True)
+                head = (start - low) // factor
+                tail = (high - stop) // factor
+            useful = decimated[head:decimated.size - tail] if tail else decimated[head:]
+            pieces.append(np.asarray(useful, dtype=np.float32))
+            self.release_until(low)
         track = np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
+        self.release_all()  # l'analyse vient de parcourir tout le fichier
         return track, int(round(effective_rate))
 
 
