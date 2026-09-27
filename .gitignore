@@ -1,6 +1,11 @@
-# Environnements Python
+# Tout ce que install.sh / install.ps1 créent : l'installation vit dans le dossier
+# mais n'entre jamais dans le dépôt.
 .venv/
+.venv-gui/
 venv/
+.cache/
+tools/
+.install-state
 __pycache__/
 *.py[cod]
 *.egg-info/

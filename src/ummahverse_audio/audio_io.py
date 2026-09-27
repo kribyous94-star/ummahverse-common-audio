@@ -8,6 +8,7 @@ le pipeline travaille par blocs et le système gère le cache disque.
 from __future__ import annotations
 
 import mmap
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -54,10 +55,29 @@ def release_pages(array: np.ndarray, first_byte: int, last_byte: int) -> None:
         pass
 
 
+#: Variable d'environnement imposant l'emplacement des fichiers temporaires.
+ENV_WORKSPACE = "UMMAHVERSE_WORKSPACE"
+
+
+def default_workspace_root() -> Path | None:
+    """Racine des fichiers temporaires : `UMMAHVERSE_WORKSPACE`, sinon le dossier système.
+
+    Les scripts `run.*` pointent cette variable vers `.cache/workspace/` dans le dossier
+    du projet, pour que supprimer ce dossier ne laisse rien derrière lui.
+    """
+    configured = os.environ.get(ENV_WORKSPACE, "").strip()
+    if not configured:
+        return None
+    root = Path(configured)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 class Workspace:
     """Répertoire temporaire pour les PCM intermédiaires et les accumulateurs."""
 
     def __init__(self, base: Path | None = None) -> None:
+        base = base or default_workspace_root()
         self.root = Path(tempfile.mkdtemp(prefix="ummahverse-", dir=str(base) if base else None))
 
     def file(self, name: str) -> Path:
