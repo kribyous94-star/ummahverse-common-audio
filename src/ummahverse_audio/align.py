@@ -472,6 +472,16 @@ def build_offset_map(audio_a, audio_b, block_frames: int, global_delay: DelayEst
         delays[~comparable] = np.interp(starts[~comparable].astype(np.float64),
                                         starts[comparable].astype(np.float64),
                                         delays[comparable])
+    elif not comparable.any():
+        # Aucun bloc ne confirme son décalage : on retient le décalage global, qui
+        # vient de l'alignement d'enveloppes. C'est grossier, mais suffisant pour la
+        # séparation en magnitude, qui ne dépend d'aucune relation de phase.
+        delays[:] = base
+        notes.append(
+            "Aucun bloc ne confirme son décalage localement : le décalage global est "
+            "appliqué partout. Suffisant pour une séparation en magnitude, insuffisant "
+            "pour une annulation de phase."
+        )
 
     drift_ppm = _estimate_drift_ppm(starts, delays, comparable)
     if abs(drift_ppm) > 5.0:

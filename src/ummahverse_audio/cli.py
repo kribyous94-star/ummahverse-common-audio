@@ -78,9 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
                          help="index du flux audio de B (voir la commande probe)")
     extract.add_argument("--sample-rate", type=int, default=None,
                          help="fréquence de travail imposée (défaut : la plus élevée des deux)")
-    extract.add_argument("--method", choices=METHODS, default="wiener",
-                         help="estimateur du commun (défaut : wiener ; les autres sont les "
-                              "baselines de comparaison)")
+    extract.add_argument("--method", choices=METHODS, default="auto",
+                         help="estimateur du commun. « auto » (défaut) choisit wiener si "
+                              "les deux versions partagent une relation de phase, et "
+                              "magnitude sinon — cas des mixages différents")
+    extract.add_argument("--magnitude-oversubtraction", type=float, default=1.0,
+                         help="en mode magnitude, au-dessus de 1 on retire davantage de "
+                              "fond, au risque d'entamer la voix (défaut : 1)")
     extract.add_argument("--transfer", choices=("band", "gain", "none"), default="band",
                          dest="transfer_mode",
                          help="transformation estimée entre versions (défaut : band)")
@@ -162,7 +166,9 @@ def _run_extract(args: argparse.Namespace) -> int:
     options = ExtractOptions(
         input_a=args.input_a, input_b=args.input_b, out_dir=args.out_dir,
         stream_a=args.stream_a, stream_b=args.stream_b, sample_rate=args.sample_rate,
-        method=args.method, transfer_mode=args.transfer_mode, win_length=args.win_length,
+        method=args.method, transfer_mode=args.transfer_mode,
+        magnitude_oversubtraction=args.magnitude_oversubtraction,
+        win_length=args.win_length,
         hop=args.hop, smooth_frames=args.smooth_frames, smooth_bins=args.smooth_bins,
         bias_correction=args.bias_correction, magnitude_cap=args.magnitude_cap,
         block_seconds=args.block_seconds, max_offset_s=args.max_offset_s,

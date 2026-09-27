@@ -22,7 +22,7 @@ import numpy as np
 
 from .blocks import BlockPlan, align_spectrum, read_extended, split_delay
 from .stft import (StftConfig, debias_coherence, local_spectra,
-                   magnitude_squared_coherence, smooth_cross)
+                   magnitude_squared_coherence, smooth2d, smooth_cross)
 
 #: Bandes d'octave utilisées pour résumer `H` dans les métadonnées.
 OCTAVE_EDGES = (0.0, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0)
@@ -44,6 +44,13 @@ class Transfer:
     estimator: str = "power"
     mean_coherence: float = 0.0
     mean_coherence_debiased: float = 0.0
+    magnitude_response: np.ndarray | None = None
+    """|H(f)| estimé sur les spectres moyens à long terme, sans aucune phase.
+
+    Seul estimateur utilisable quand les deux versions n'ont plus de relation de
+    phase : il compare des énergies, ce qu'un remixage ou un ré-étirement temporel
+    laisse intact.
+    """
     """Cohérence locale moyenne, pondérée par l'énergie de A, sur les blocs sondés.
 
     C'est la mesure qui dit s'il existe une bande commune : proche de 0, les deux
@@ -71,6 +78,9 @@ class Transfer:
             "reliable_cells": int(self.reliable_cells),
             "broadband_gain_per_channel": [round(g, 5) for g in self.broadband_gain],
             "band_gain_db_per_channel": self.band_gain_db,
+            "magnitude_gain_per_channel": (
+                [round(float(np.median(row)), 5) for row in self.magnitude_response]
+                if self.magnitude_response is not None else []),
             "warnings": list(self.warnings),
         }
 
@@ -148,6 +158,8 @@ def estimate_transfer(audio_a, audio_b, offset_map, config: StftConfig, plan: Bl
     reliable_cells = 0
     coherence_weighted = 0.0
     coherence_weight = 0.0
+    power_a = np.zeros((channels, bins), dtype=np.float64)
+    power_b = np.zeros((channels, bins), dtype=np.float64)
 
     picks = _select_probe_blocks(offset_map, probe_blocks)
     for position, index in enumerate(picks):
@@ -172,6 +184,10 @@ def estimate_transfer(audio_a, audio_b, offset_map, config: StftConfig, plan: Bl
             reliable_cells += int(reliable.sum())
             coherence_weighted += float(np.sum(gamma * saa))
             coherence_weight += float(np.sum(saa))
+            # Spectres moyens, toutes cases confondues : base de l'estimateur en
+            # magnitude, qui ne suppose aucune relation de phase.
+            power_a[channel] += np.sum(saa, axis=1)
+            power_b[channel] += np.sum(sbb, axis=1)
             if not reliable.any():
                 continue
             numerator[channel] += np.sum(np.where(reliable, np.conj(sab), 0.0), axis=1)
@@ -234,10 +250,20 @@ def estimate_transfer(audio_a, audio_b, offset_map, config: StftConfig, plan: Bl
             "canaux sont appariés dans le bon ordre."
         )
 
+    magnitude_response = np.sqrt((power_b + 1e-30) / (power_a + 1e-30))
+    # Lissage fréquentiel : |H| décrit une égalisation de mastering, pas le détail
+    # d'une trame. Bornage autour du gain large bande pour rester une enveloppe.
+    magnitude_response = smooth2d(magnitude_response, bins=6, frames=0)
+    for channel in range(channels):
+        reference = float(np.median(magnitude_response[channel]))
+        magnitude_response[channel] = np.clip(magnitude_response[channel],
+                                              reference / 6.0, reference * 6.0)
+
     return Transfer(
         mode=mode, response=response, reliable_fraction=reliable_fraction,
         reliable_cells=reliable_cells, coherence_threshold=coherence_threshold,
         estimator=estimator, mean_coherence=mean_coherence,
-        mean_coherence_debiased=mean_coherence_debiased, broadband_gain=broadband,
+        mean_coherence_debiased=mean_coherence_debiased,
+        magnitude_response=magnitude_response, broadband_gain=broadband,
         band_gain_db=_octave_summary(response, config.sample_rate), warnings=warnings,
     )

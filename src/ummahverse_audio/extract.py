@@ -6,7 +6,7 @@ Sorties : `common.wav` (base temporelle de A), `a_only.wav` (base de A),
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +36,8 @@ B_ONLY_NAME = "b_only.wav"
 METADATA_NAME = "common.json"
 #: Au-delà, la chronologie détaillée est décimée pour garder `common.json` lisible.
 TIMELINE_LIMIT = 4000
+#: Cohérence en deçà de laquelle « auto » bascule sur la séparation en magnitude.
+AUTO_COHERENCE_THRESHOLD = 0.35
 
 
 @dataclass
@@ -48,7 +50,7 @@ class ExtractOptions:
     stream_a: int | None = None
     stream_b: int | None = None
     sample_rate: int | None = None
-    method: str = "wiener"
+    method: str = "auto"
     transfer_mode: str = "band"
     win_length: int = 8192
     hop: int | None = None
@@ -56,6 +58,7 @@ class ExtractOptions:
     smooth_bins: int = 2
     bias_correction: float = 0.0
     magnitude_cap: float = 1.5
+    magnitude_oversubtraction: float = 1.0
     block_seconds: float = 6.0
     max_offset_s: float = 30.0
     local_search_s: float = 0.35
@@ -74,8 +77,10 @@ class ExtractOptions:
         )
 
     def separation_params(self) -> SeparationParams:
-        return SeparationParams(method=self.method, bias_correction=self.bias_correction,
-                                magnitude_cap=self.magnitude_cap)
+        return SeparationParams(
+            method=self.method, bias_correction=self.bias_correction,
+            magnitude_cap=self.magnitude_cap,
+            magnitude_oversubtraction=self.magnitude_oversubtraction)
 
 
 @dataclass
@@ -201,6 +206,26 @@ def run_extract(options: ExtractOptions, progress: Progress | None = None) -> Ex
         audio_b.release_all()
         watch.mark("transfer")
 
+        if params.method == "auto":
+            coherent = transfer.mean_coherence_debiased >= AUTO_COHERENCE_THRESHOLD
+            chosen = "wiener" if coherent else "magnitude"
+            params = replace(params, method=chosen)
+            if coherent:
+                progress.log(
+                    f"Méthode retenue : wiener (cohérence "
+                    f"{transfer.mean_coherence_debiased * 100:.1f} %, les deux versions "
+                    "partagent une relation de phase).")
+            else:
+                progress.log(
+                    f"Méthode retenue : magnitude (cohérence "
+                    f"{transfer.mean_coherence_debiased * 100:.1f} %). Les deux versions "
+                    "n'ont plus de relation de phase — mixages différents ou piste "
+                    "ré-étirée — mais leurs spectres restent comparables.")
+                warnings.append(
+                    "Relation de phase absente entre les deux versions : séparation en "
+                    "magnitude. Le fond commun est retrouvé, mais une part du dialogue "
+                    "fuit dans le commun — voir docs/limitations.md.")
+
         progress.stage("Estimation du commun bloc par bloc")
         summary, timeline, measurements = _process_blocks(
             audio_a, audio_b, offset_map, config, plan, params, transfer, workspace,
@@ -262,20 +287,12 @@ def _process_blocks(audio_a, audio_b, offset_map, config: StftConfig, plan: Bloc
             # le décalage interpolé de ses voisins : là où rien n'est partagé, la
             # puissance commune tombe d'elle-même à zéro, alors que sauter le bloc
             # créait un trou audible — le commun jouait, s'arrêtait, reprenait.
-            usable = bool(offset_map.comparable.any())
+            # Tous les blocs sont traités : le décalage vient du bloc lui-même quand il
+            # est confirmé, de ses voisins sinon, et de l'alignement global en dernier
+            # recours. Là où rien n'est partagé, la puissance commune tombe d'elle-même
+            # à zéro — inutile de creuser un trou dans le commun.
             if not bool(offset_map.comparable[index]):
                 summary.blocks_uncertain += 1
-
-            if not usable:
-                # Aucun décalage exploitable nulle part : politique explicite, commun
-                # nul et résidu identique à l'entrée. On n'invente pas de bande commune.
-                zeros = np.zeros((plan.block_frames, audio_a.channels), dtype=np.float64)
-                sink_a.add(start, zeros, weights)
-                sink_b.add(start + integer, zeros, weights)
-                summary.blocks_skipped += 1
-                timeline.append(_timeline_entry(start, audio_a.sample_rate, delay,
-                                               offset_map, index, None))
-                continue
 
             block_a = read_extended(audio_a, start, plan)
             # B est lu large : chaque canal y est ensuite découpé à son propre
@@ -294,9 +311,15 @@ def _process_blocks(audio_a, audio_b, offset_map, config: StftConfig, plan: Bloc
                     sft.stft(wide_b[lo:lo + extended, channel].astype(np.float64)),
                     fractional + extra, config)
                 spec_c, diagnostics = estimate_common_spectrum(
-                    spec_a, spec_b, transfer.response[channel], config, params)
+                    spec_a, spec_b, transfer.response[channel], config, params,
+                    magnitude_transfer=(None if transfer.magnitude_response is None
+                                        else transfer.magnitude_response[channel]))
                 common_a[:, channel] = sft.istft(spec_c, k0=0, k1=extended)
-                spec_c_b = delay_spectrum(spec_c * transfer.response[channel][:, None],
+                render = (transfer.response[channel]
+                          if params.method != "magnitude"
+                          or transfer.magnitude_response is None
+                          else transfer.magnitude_response[channel])
+                spec_c_b = delay_spectrum(spec_c * render[:, None],
                                           fractional + extra, config)
                 common_b[:, channel] = sft.istft(spec_c_b, k0=0, k1=extended)
                 summary.diagnostics.merge(diagnostics)

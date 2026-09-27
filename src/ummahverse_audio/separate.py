@@ -34,11 +34,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .stft import (StftConfig, debias_coherence, local_spectra,
+from .stft import (StftConfig, debias_coherence, local_spectra, smooth2d,
                    magnitude_squared_coherence)
 
 #: Méthodes disponibles ; `wiener` est la méthode retenue, les autres sont les baselines.
-METHODS = ("wiener", "average", "min-magnitude", "coherence-mask")
+METHODS = ("auto", "wiener", "magnitude", "average", "min-magnitude", "coherence-mask")
+#: Méthodes réellement applicables (« auto » est résolu avant le traitement).
+CONCRETE_METHODS = ("wiener", "magnitude", "average", "min-magnitude", "coherence-mask")
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,12 @@ class SeparationParams:
     bias_correction: float = 0.0
     magnitude_cap: float = 1.5
     floor_ratio: float = 1e-10
+    magnitude_oversubtraction: float = 1.0
+    """Facteur appliqué à la puissance commune estimée en mode magnitude.
+
+    Au-dessus de 1, on retire davantage : moins de fond dans le résidu, mais la voix
+    commence à être entamée. En dessous, l'inverse.
+    """
 
     def as_dict(self) -> dict:
         return {
@@ -56,6 +64,7 @@ class SeparationParams:
             "bias_correction": self.bias_correction,
             "magnitude_cap": self.magnitude_cap,
             "floor_ratio": self.floor_ratio,
+            "magnitude_oversubtraction": self.magnitude_oversubtraction,
         }
 
 
@@ -100,7 +109,9 @@ class BlockDiagnostics:
 
 def estimate_common_spectrum(spec_a: np.ndarray, spec_b: np.ndarray,
                              transfer: np.ndarray, config: StftConfig,
-                             params: SeparationParams) -> tuple[np.ndarray, BlockDiagnostics]:
+                             params: SeparationParams,
+                             magnitude_transfer: np.ndarray | None = None
+                             ) -> tuple[np.ndarray, BlockDiagnostics]:
     """Estime le spectre du commun dans le repère de A pour un canal et un bloc.
 
     `spec_b` est déjà aligné sur `spec_a` (décalage entier + rampe de phase), et
@@ -131,6 +142,22 @@ def estimate_common_spectrum(spec_a: np.ndarray, spec_b: np.ndarray,
         spec_c = cap_magnitude * np.exp(1j * np.angle(spec_a))
     elif params.method == "coherence-mask":
         spec_c = gamma * spec_a
+    elif params.method == "magnitude":
+        # Aucune phase n'intervient. Modèle en puissance, par case :
+        #     P_A = P_M + P_DA        P_B = |H|² P_M + P_DB
+        # Les dialogues des deux langues n'occupent pas les mêmes cases — mots
+        # différents, instants différents — donc le minimum des deux puissances
+        # égalisées estime le fond commun. Biaisé vers le haut là où les deux
+        # parlent en même temps : c'est la limite connue de la méthode.
+        h_magnitude = (np.abs(h) if magnitude_transfer is None
+                       else np.asarray(magnitude_transfer, dtype=np.float64)[:, None])
+        h_magnitude = np.maximum(h_magnitude, 1e-6)
+        power_b = smooth2d(np.abs(spec_b) ** 2 / h_magnitude ** 2,
+                           config.smooth_bins, config.smooth_frames)
+        power_a = smooth2d(np.abs(spec_a) ** 2, config.smooth_bins, config.smooth_frames)
+        common_power = params.magnitude_oversubtraction * np.minimum(power_a, power_b)
+        mask = np.sqrt(np.clip(common_power / np.maximum(power_a, floor), 0.0, 1.0))
+        spec_c = mask * spec_a   # la phase de A est conservée telle quelle
     else:
         # Puissance commune lue dans l'inter-spectre : |S_AB| = |H|·S_CC.
         cross2 = np.abs(sab) ** 2
