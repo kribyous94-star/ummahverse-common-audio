@@ -209,7 +209,7 @@ long1800 maxrss=411052 kB
 ## Suite de tests
 
 ```
-137 tests, ~30 s   (dont 11 tests d'interface graphique, en mode « offscreen »)
+140 tests, ~30 s   (dont 14 tests d'interface graphique, en mode « offscreen »)
 ```
 
 | Fichier | Ce qu'il quantifie |

@@ -58,6 +58,71 @@ def test_subtract_leaves_common_metadata_and_input_untouched(scene, extracted, t
         assert fingerprint(path) == reference, f"{path.name} a été modifié"
 
 
+def test_analysis_creates_no_file_at_all(tmp_path):
+    """« Analyser / synchroniser » ne produit aucun fichier : que des nombres.
+
+    L'étape mesure le décalage, la dérive et le gain ; elle n'écrit ni piste recalée,
+    ni copie, ni rapport. Le seul fichier qu'elle touche est la copie temporaire de
+    décodage, supprimée à la fin.
+    """
+    from ummahverse_audio.analyze import run_analysis
+
+    scene = build_scene(tmp_path / "source", seconds=4.0)
+    protected = {path: fingerprint(path) for path in (scene.a, scene.b, scene.third)}
+    inventory = sorted(item.name for item in scene.a.parent.iterdir())
+
+    report = run_analysis(ExtractOptions(input_a=scene.a, input_b=scene.b,
+                                         out_dir=tmp_path / "jamais_creee"))
+
+    # Les entrées sont intactes, date de modification comprise.
+    for path, reference in protected.items():
+        assert fingerprint(path) == reference, f"{path.name} a été modifié"
+    # Aucun fichier n'est apparu à côté des entrées.
+    assert sorted(item.name for item in scene.a.parent.iterdir()) == inventory
+    # Le dossier de sortie n'est même pas créé : l'analyse n'écrit rien.
+    assert not (tmp_path / "jamais_creee").exists()
+    # Le résultat est un rapport en mémoire, pas un fichier.
+    assert report.payload["operation"] == "analyze"
+    assert report.payload["alignment"]["global_delay_s"] > 0
+
+
+def test_analysis_works_on_a_fully_read_only_location(tmp_path):
+    """Preuve par le système : rien n'est écrit là où l'écriture est impossible."""
+    from ummahverse_audio.analyze import run_analysis
+
+    scene = build_scene(tmp_path / "source", seconds=4.0)
+    directory = scene.a.parent
+    for path in directory.iterdir():
+        path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    directory.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        report = run_analysis(ExtractOptions(input_a=scene.a, input_b=scene.b,
+                                             out_dir=tmp_path / "ailleurs"))
+        assert report.payload["alignment"]["comparable_block_fraction"] > 0.5
+    finally:
+        directory.chmod(stat.S_IRWXU)
+        for path in directory.iterdir():
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
+def test_alignment_is_stored_as_numbers_not_as_realigned_audio(scene, extracted):
+    """La synchronisation produit une carte de décalages, pas une piste recalée.
+
+    Rien dans les sorties n'est une copie « redressée » d'une entrée : le décalage est
+    une donnée des métadonnées, appliquée en mémoire au moment de l'extraction.
+    """
+    alignment = extracted.metadata["alignment"]
+    assert isinstance(alignment["global_delay_s"], float)
+    assert alignment["comparable_segments"], "la carte de décalages doit être publiée"
+    entries = extracted.metadata["timeline"]["entries"]
+    assert entries and all("delay_s" in entry for entry in entries)
+    # Les sorties sont dans les repères documentés, pas dans un repère « synchronisé ».
+    outputs = extracted.metadata["outputs"]
+    assert outputs["common_wav"]["timebase"] == "A"
+    assert outputs["a_only_wav"]["timebase"] == "A"
+    assert outputs["b_only_wav"]["timebase"] == "B"
+
+
 def test_inputs_can_be_read_only_files(tmp_path):
     """Un traitement doit réussir même si les entrées sont en lecture seule.
 

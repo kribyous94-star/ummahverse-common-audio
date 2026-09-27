@@ -27,7 +27,7 @@ présentée comme faite sans l'avoir été.
 | Erreur de permissions | ✅ réussi (dossier en lecture seule refusé) | ⬜ **non testé** |
 | CLI `extract` / `subtract` / `probe` / `analyze` | ✅ réussi | ⬜ **non testé** |
 | `bash scripts/smoke.sh` | ✅ réussi | s. o. (script bash) |
-| Suite `pytest` | ✅ réussi, 137 tests | ⬜ **non testé** |
+| Suite `pytest` | ✅ réussi, 140 tests | ⬜ **non testé** |
 | **Écoute réelle sur un film** | ⬜ **non fait** | ⬜ **non fait** |
 
 ## 1. Ubuntu — ce qui a été exécuté
